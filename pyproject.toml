@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "testgap"
+version = "0.1.0a0"
+description = "AI-powered test generator that closes coverage gaps in your PRs — only suggests tests that actually pass."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Sanghun Lee" }
+]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "tomli>=2.0 ; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.5.0",
+]
+
+[project.scripts]
+testgap = "testgap.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/nrhys2005/test-gap"
+Issues = "https://github.com/nrhys2005/test-gap/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/testgap"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/testgap/cli.py" = ["B008"]  # typer.Option in defaults is canonical

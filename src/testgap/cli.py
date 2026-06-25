@@ -15,7 +15,9 @@ from testgap.config.init_wizard import (
     suggest_model,
     write_config,
 )
-from testgap.config.loader import CONFIG_FILENAME
+from testgap.config.loader import CONFIG_FILENAME, ConfigError, load_config
+from testgap.generator import LLMClient
+from testgap.pipeline import DiffRunReport, FunctionSuggestion, run_diff
 
 app = typer.Typer(
     name="testgap",
@@ -133,6 +135,110 @@ def _choose_source_paths(report, *, yes: bool) -> list[str]:
         return [custom]
 
     return report.source_paths
+
+
+@app.command()
+def diff(
+    base: str | None = typer.Option(
+        None, "--base", "-b", help="Base git ref. Defaults to origin/HEAD then main/master."
+    ),
+    head: str = typer.Option("HEAD", "--head", help="Head ref. Defaults to HEAD."),
+    max_functions: int | None = typer.Option(
+        None, "--max-functions", "-n", help="Limit number of functions processed."
+    ),
+    path: Path | None = typer.Option(None, "--path", "-p", file_okay=False),
+) -> None:
+    """Analyze the diff and propose tests for uncovered changes (non-interactive)."""
+    root = (path or Path.cwd()).resolve()
+
+    try:
+        config = load_config()
+    except ConfigError as e:
+        console.print(f"[red]✗[/] {escape(str(e))}")
+        raise typer.Exit(code=1) from e
+
+    console.print(f"[bold]Analyzing diff[/] in {root}")
+
+    llm_client = LLMClient(model=config.llm.model, max_retries=config.llm.max_retries)
+
+    try:
+        report = run_diff(
+            project_root=root,
+            config=config,
+            llm_client=llm_client,
+            base_ref=base,
+            head_ref=head,
+            max_functions=max_functions,
+        )
+    except Exception as e:  # surface user-facing errors from coverage/git layers
+        console.print(f"[red]✗[/] {escape(str(e))}")
+        raise typer.Exit(code=1) from e
+
+    _print_diff_report(report)
+
+    if report.suggestions and not all(s.succeeded for s in report.suggestions):
+        raise typer.Exit(code=1)
+
+
+def _print_diff_report(report: DiffRunReport) -> None:
+    console.print(f"[dim]base[/] {report.base_ref} → [dim]head[/] {report.head_ref}")
+
+    if report.skipped_reason:
+        console.print(f"[green]✓[/] {report.skipped_reason}")
+        return
+
+    summary = (
+        f"changed lines: {report.changed_total}   "
+        f"covered: {report.covered_total}   "
+        f"diff coverage: {report.diff_coverage_pct}%"
+    )
+    console.print(summary)
+    console.print()
+
+    for i, suggestion in enumerate(report.suggestions, 1):
+        _print_suggestion(i, len(report.suggestions), suggestion)
+
+    console.print()
+    console.print(f"[dim]LLM cost this run:[/] ${report.cost_total:.4f}")
+
+
+def _print_suggestion(idx: int, total: int, s: FunctionSuggestion) -> None:
+    file_label = escape(f"{s.function.file.name}::{s.function.qualname}")
+    header = f"[{idx}/{total}] {file_label}"
+    console.print(f"[bold]{header}[/]")
+    lines_str = ", ".join(str(n) for n in s.function.uncovered_lines[:8])
+    if len(s.function.uncovered_lines) > 8:
+        lines_str += ", …"
+    console.print(f"  uncovered lines: {lines_str}")
+
+    if s.error:
+        console.print(f"  [red]✗[/] {escape(s.error)}")
+        return
+
+    if s.validator_result is None or s.generated is None:
+        console.print("  [yellow]![/] no result captured")
+        return
+
+    if s.validator_result.environment_error:
+        console.print(f"  [red]✗[/] {escape(s.validator_result.environment_error)}")
+        return
+
+    passed_n = len(s.validator_result.passed)
+    failed_n = len(s.validator_result.failed)
+    total_n = len(s.validator_result.cases)
+    cost_label = f"${s.cost_usd:.4f}" if s.cost_usd > 0 else "$0 (cost unknown)"
+
+    if s.succeeded:
+        console.print(
+            f"  [green]✓[/] {passed_n}/{total_n} tests passed   {cost_label}"
+        )
+    else:
+        console.print(
+            f"  [yellow]![/] {passed_n} pass / {failed_n} fail of {total_n}   {cost_label}"
+        )
+
+    for case in s.validator_result.failed[:3]:
+        console.print(f"    [red]·[/] {escape(case.name)}")
 
 
 def _choose_model(*, yes: bool) -> str:

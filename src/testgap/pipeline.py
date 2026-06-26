@@ -179,7 +179,8 @@ def _process_function(
 
     suggestion.generated = generated
 
-    tmp_path = _write_temp_test(func=func, project_root=project_root, generated=generated)
+    test_dir = test_dirs[0] if test_dirs else (project_root / "tests")
+    tmp_path = _write_temp_test(func=func, test_dir=test_dir, generated=generated)
     try:
         result = run_pytest_on_file(
             tmp_path,
@@ -194,13 +195,12 @@ def _process_function(
 
 
 def _write_temp_test(
-    *, func: UncoveredFunction, project_root: Path, generated: GeneratedTestSet
+    *, func: UncoveredFunction, test_dir: Path, generated: GeneratedTestSet
 ) -> Path:
-    tests_dir = project_root / "tests"
-    tests_dir.mkdir(parents=True, exist_ok=True)
+    test_dir.mkdir(parents=True, exist_ok=True)
     stem = func.qualname.replace(".", "_")
     # Use a test_*.py prefix so pytest collects it. Cleaned up after validation.
-    path = tests_dir / f"test_testgap_tmp_{stem}.py"
+    path = test_dir / f"test_testgap_tmp_{stem}.py"
     path.write_text(generated.to_source(), encoding="utf-8")
     return path
 

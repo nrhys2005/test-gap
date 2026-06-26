@@ -101,7 +101,8 @@ def ensure_gitignore_entry(root: Path, entry: str = ".testgap/") -> bool:
     """Append entry to .gitignore if missing. Returns True if file was modified."""
     gitignore = root / ".gitignore"
     if not gitignore.is_file():
-        return False
+        gitignore.write_text(f"# TestGap\n{entry}\n", encoding="utf-8")
+        return True
     content = gitignore.read_text(encoding="utf-8")
     lines = {line.strip() for line in content.splitlines()}
     if entry.strip() in lines or entry.rstrip("/") in lines:

@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -23,7 +24,7 @@ def run_pytest_on_file(
         report_path.unlink()
 
     cmd = [
-        "python",
+        sys.executable,
         "-m",
         "pytest",
         str(test_file),
@@ -100,7 +101,7 @@ def _fallback_parse(
     completed: subprocess.CompletedProcess[str], duration: float
 ) -> ValidatorResult:
     """When json-report plugin isn't available, do best-effort text parsing."""
-    text = completed.stdout
+    text = completed.stdout + "\n" + completed.stderr
     env_err: str | None = None
     if "ERRORS" in text or "ERROR collecting" in text or "ImportError" in text:
         env_err = "pytest reported an environment/collection error"

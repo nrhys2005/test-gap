@@ -58,7 +58,7 @@ def _score(test_path: Path, target_stem: str, target_parts: tuple[str, ...]) -> 
 
 def _read_test_snippet(path: Path, max_chars: int) -> str:
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
     if not text.strip():

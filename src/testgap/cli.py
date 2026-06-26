@@ -223,21 +223,31 @@ def _print_suggestion(idx: int, total: int, s: FunctionSuggestion) -> None:
         console.print(f"  [red]✗[/] {escape(s.validator_result.environment_error)}")
         return
 
-    passed_n = len(s.validator_result.passed)
-    failed_n = len(s.validator_result.failed)
-    total_n = len(s.validator_result.cases)
+    accepted_n = len(s.accepted_cases)
+    discarded_n = len(s.discarded_cases)
+    total_n = accepted_n + discarded_n
     cost_label = f"${s.cost_usd:.4f}" if s.cost_usd > 0 else "$0 (cost unknown)"
+    retried_marker = " [retried]" if s.attempts == 2 else ""
 
-    if s.succeeded:
+    if s.fully_passed:
         console.print(
-            f"  [green]✓[/] {passed_n}/{total_n} tests passed   {cost_label}"
+            f"  [green]✓[/] {accepted_n}/{total_n} tests passed   {cost_label}{retried_marker}"
+        )
+    elif s.succeeded:
+        console.print(
+            f"  [yellow]![/] {accepted_n} kept / {discarded_n} discarded   "
+            f"{cost_label}{retried_marker}"
         )
     else:
         console.print(
-            f"  [yellow]![/] {passed_n} pass / {failed_n} fail of {total_n}   {cost_label}"
+            f"  [yellow]![/] {accepted_n} pass / {discarded_n} fail of {total_n}   "
+            f"{cost_label}{retried_marker}"
         )
 
-    for case in s.validator_result.failed[:3]:
+    if s.retry_skipped_reason:
+        console.print(f"  [yellow]![/] retry skipped: {escape(s.retry_skipped_reason)}")
+
+    for case in s.discarded_cases[:3]:
         console.print(f"    [red]·[/] {escape(case.name)}")
 
 

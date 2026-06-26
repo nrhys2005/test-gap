@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,7 +34,7 @@ def run_pytest_with_coverage(
         source_args.extend(["--cov", path.rstrip("/")])
 
     cmd = [
-        "python",
+        sys.executable,
         "-m",
         "pytest",
         *source_args,

@@ -37,7 +37,7 @@ def group_by_function(uncovered: list[UncoveredLine]) -> list[UncoveredFunction]
 
 def _group_in_file(file: Path, lines: list[int]) -> list[UncoveredFunction]:
     try:
-        source = file.read_text(encoding="utf-8")
+        source = file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
 

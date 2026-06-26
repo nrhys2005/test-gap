@@ -71,5 +71,9 @@ def test_ensure_gitignore_appends_once(tmp_project: Path):
     assert ensure_gitignore_entry(tmp_project) is False
 
 
-def test_ensure_gitignore_skips_when_missing(tmp_project: Path):
-    assert ensure_gitignore_entry(tmp_project) is False
+def test_ensure_gitignore_creates_when_missing(tmp_project: Path):
+    gi = tmp_project / ".gitignore"
+    assert not gi.exists()
+
+    assert ensure_gitignore_entry(tmp_project) is True
+    assert ".testgap/" in gi.read_text(encoding="utf-8")

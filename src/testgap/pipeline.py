@@ -80,6 +80,18 @@ class DiffRunReport:
 
 
 @dataclass
+class DiffMetadata:
+    """Diff + coverage measurement summary (no suggestions)."""
+
+    base_ref: str
+    head_ref: str
+    diff_coverage_pct: float
+    changed_total: int
+    covered_total: int
+    skipped_reason: str | None = None
+
+
+@dataclass
 class _CallFailure:
     kind: Literal["llm", "parse", "budget"]
     message: str
@@ -92,20 +104,35 @@ class _CallSuccess:
     response: LLMResponse
 
 
-def run_diff(
+def prepare_test_dirs(config: TestGapConfig, project_root: Path) -> list[Path]:
+    """Resolve configured `test_paths` to absolute Paths under `project_root`."""
+    return [project_root / p.rstrip("/") for p in config.project.test_paths]
+
+
+def module_import_path(file: Path, project_root: Path, source_paths: list[str]) -> str:
+    """Public wrapper around `_module_import_path` used by interactive UI."""
+    return _module_import_path(file, project_root, source_paths)
+
+
+def discover_targets(
     *,
     project_root: Path,
     config: TestGapConfig,
-    llm_client: LLMClient,
-    base_ref: str | None = None,
-    head_ref: str = "HEAD",
-    max_functions: int | None = None,
-) -> DiffRunReport:
+    base_ref: str | None,
+    head_ref: str,
+    max_functions: int | None,
+) -> tuple[list[UncoveredFunction], DiffMetadata]:
+    """diff + coverage 측정으로 미커버 함수 목록과 메타데이터 반환.
+
+    내부적으로 ``run_pytest_with_coverage`` 를 1회 호출하므로 (재커버리지 측정)
+    호출 비용이 작지 않다. 단일 세션에서 한 번만 호출되도록 cli/interactive 가
+    보장한다.
+    """
     resolved_base = resolve_base_ref(project_root, base_ref)
     diff = changed_lines(project_root, resolved_base, head_ref)
 
     if not diff:
-        return DiffRunReport(
+        return [], DiffMetadata(
             base_ref=resolved_base,
             head_ref=head_ref,
             diff_coverage_pct=100.0,
@@ -126,7 +153,7 @@ def run_diff(
     )
 
     if not diff_report.uncovered:
-        return DiffRunReport(
+        return [], DiffMetadata(
             base_ref=resolved_base,
             head_ref=head_ref,
             diff_coverage_pct=diff_report.diff_coverage_pct,
@@ -139,8 +166,69 @@ def run_diff(
     if max_functions is not None:
         functions = functions[:max_functions]
 
+    meta = DiffMetadata(
+        base_ref=resolved_base,
+        head_ref=head_ref,
+        diff_coverage_pct=diff_report.diff_coverage_pct,
+        changed_total=diff_report.changed_total,
+        covered_total=diff_report.covered_total,
+    )
+    return functions, meta
+
+
+def process_function(
+    *,
+    func: UncoveredFunction,
+    project_root: Path,
+    config: TestGapConfig,
+    llm_client: LLMClient,
+    tracker: CostTracker,
+    test_dirs: list[Path],
+) -> FunctionSuggestion:
+    """Public wrapper around the private `_process_function`.
+
+    Kept intentionally as a separate function (not an alias) so the public
+    signature is stable even if `_process_function` evolves internally.
+    """
+    return _process_function(
+        func=func,
+        project_root=project_root,
+        config=config,
+        llm_client=llm_client,
+        tracker=tracker,
+        test_dirs=test_dirs,
+    )
+
+
+def run_diff(
+    *,
+    project_root: Path,
+    config: TestGapConfig,
+    llm_client: LLMClient,
+    base_ref: str | None = None,
+    head_ref: str = "HEAD",
+    max_functions: int | None = None,
+) -> DiffRunReport:
+    functions, diff_meta = discover_targets(
+        project_root=project_root,
+        config=config,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        max_functions=max_functions,
+    )
+
+    if not functions:
+        return DiffRunReport(
+            base_ref=diff_meta.base_ref,
+            head_ref=diff_meta.head_ref,
+            diff_coverage_pct=diff_meta.diff_coverage_pct,
+            changed_total=diff_meta.changed_total,
+            covered_total=diff_meta.covered_total,
+            skipped_reason=diff_meta.skipped_reason,
+        )
+
     tracker = CostTracker(max_cost_per_run=config.llm.max_cost_per_run)
-    test_dirs = [project_root / p.rstrip("/") for p in config.project.test_paths]
+    test_dirs = prepare_test_dirs(config, project_root)
 
     suggestions: list[FunctionSuggestion] = []
     for func in functions:
@@ -157,11 +245,11 @@ def run_diff(
             break
 
     return DiffRunReport(
-        base_ref=resolved_base,
-        head_ref=head_ref,
-        diff_coverage_pct=diff_report.diff_coverage_pct,
-        changed_total=diff_report.changed_total,
-        covered_total=diff_report.covered_total,
+        base_ref=diff_meta.base_ref,
+        head_ref=diff_meta.head_ref,
+        diff_coverage_pct=diff_meta.diff_coverage_pct,
+        changed_total=diff_meta.changed_total,
+        covered_total=diff_meta.covered_total,
         suggestions=suggestions,
         cost_total=tracker.spent,
     )

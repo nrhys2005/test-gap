@@ -25,7 +25,7 @@ from testgap.generator import (
     find_few_shot_examples,
     parse_response,
 )
-from testgap.generator.prompt import PreviousFailure, PromptContext
+from testgap.generator.prompt import PreviousFailure, PromptContext, _estimate_tokens
 from testgap.validator import TestCaseResult, ValidatorResult, run_pytest_on_file
 
 
@@ -288,7 +288,7 @@ def _process_function(
     accepted_all = accepted + accepted2
     discarded_all = failed + failed2
 
-    merged = _merge_generated(generated_first, generated_second, accepted_all)
+    merged = _merge_generated(generated_first, generated_second, accepted, accepted2)
     _finalize(
         suggestion,
         generated=merged,
@@ -401,30 +401,24 @@ def _estimate_retry_cost(
     unit_cost = first_response.cost_usd / total_first
 
     text = "\n".join(m.get("content", "") for m in retry_msgs)
-    input_tokens = _count_tokens(text)
+    input_tokens = _estimate_tokens(text)
     return unit_cost * (input_tokens + response_tokens)
-
-
-def _count_tokens(text: str) -> int:
-    try:
-        from litellm import token_counter  # type: ignore[import-not-found]
-
-        return int(token_counter(model="gpt-3.5-turbo", text=text))
-    except Exception:
-        return max(1, len(text) // 4)
 
 
 def _merge_generated(
     first: GeneratedTestSet,
     second: GeneratedTestSet,
-    accepted_cases: list[TestCaseResult],
+    accepted_first: list[TestCaseResult],
+    accepted_second: list[TestCaseResult],
 ) -> GeneratedTestSet:
     """Combine two generated sets, keeping only tests whose names were accepted.
 
-    Imports are deduplicated (first occurrence wins). When the same test name
-    appears in both rounds, the 2nd-round version takes precedence.
+    Imports are deduplicated (first occurrence wins). Each round is filtered by
+    its own accepted set — if the same test name passed in round 1 but failed
+    when regenerated in round 2, the round-1 (passing) version is preserved.
     """
-    accepted_names = {_short_name(c.name) for c in accepted_cases}
+    accepted_first_names = {_short_name(c.name) for c in accepted_first}
+    accepted_second_names = {_short_name(c.name) for c in accepted_second}
 
     merged_imports: list[str] = []
     seen_imports: set[str] = set()
@@ -435,11 +429,11 @@ def _merge_generated(
 
     by_name: dict[str, GeneratedTest] = {}
     for t in first.tests:
-        if t.name in accepted_names:
+        if t.name in accepted_first_names:
             by_name[t.name] = t
     for t in second.tests:
-        if t.name in accepted_names:
-            by_name[t.name] = t  # 2nd round wins on name collision
+        if t.name in accepted_second_names:
+            by_name[t.name] = t  # 2nd-round regeneration wins only when accepted
 
     return GeneratedTestSet(imports=merged_imports, tests=list(by_name.values()))
 

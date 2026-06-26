@@ -162,8 +162,10 @@ def _truncate_text_to_tokens(text: str, max_tokens: int) -> str:
     if current <= max_tokens:
         return text
 
-    # char/4 heuristic gives us a safe cut point even when litellm reports tokens.
+    # char/4 heuristic gives us a safe cut point when token-per-char is ~average.
+    # When the text packs more tokens per char (litellm-reported, multibyte, etc.),
+    # scale the budget proportionally so we never exceed max_tokens after cutting.
     char_budget = max(1, max_tokens * 4)
     if char_budget >= len(text):
-        return text
+        char_budget = max(1, int(len(text) * max_tokens / current))
     return text[:char_budget].rstrip() + _TRUNCATION_MARKER

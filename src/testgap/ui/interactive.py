@@ -11,6 +11,7 @@ so the module is fully unit-testable without a TTY / subprocess.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -74,9 +75,14 @@ def default_prompt_fn(message: str, *, choices: list[str], default: str) -> str:
 
 
 def default_editor_fn(path: Path) -> None:
-    """Open the user's ``$EDITOR`` (or ``vi``) on ``path``."""
-    editor = os.environ.get("EDITOR", "vi")
-    subprocess.run([editor, str(path)], check=False)
+    """Open the user's ``$EDITOR`` (or ``vi``) on ``path``.
+
+    Uses ``shlex.split`` so commands with embedded flags (e.g. ``EDITOR='code --wait'``)
+    are tokenised correctly instead of being treated as a single executable name.
+    """
+    editor = os.environ.get("EDITOR") or "vi"
+    args = shlex.split(editor) + [str(path)]
+    subprocess.run(args, check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -136,17 +142,17 @@ def run_review_session(
 
     total = len(functions)
     for i, func in enumerate(functions, 1):
-        suggestion = pipeline.process_function(
-            func=func,
-            project_root=project_root,
-            config=config,
-            llm_client=llm_client,
-            tracker=tracker,
-            test_dirs=test_dirs,
-        )
-        _format_suggestion_block(console, i, total, suggestion)
-
         try:
+            suggestion = pipeline.process_function(
+                func=func,
+                project_root=project_root,
+                config=config,
+                llm_client=llm_client,
+                tracker=tracker,
+                test_dirs=test_dirs,
+            )
+            _format_suggestion_block(console, i, total, suggestion)
+
             one = _review_one(
                 func=func,
                 suggestion=suggestion,
@@ -471,7 +477,9 @@ def _resolve_target_path(
     if not primary.exists():
         return primary, None
 
-    func_suffix = func.qualname.replace(".", "_")
+    # Strip "<locals>" markers from nested-function qualnames so the result is a
+    # legal filename on Windows (which forbids `<` and `>`).
+    func_suffix = func.qualname.replace(".", "_").replace("<", "").replace(">", "")
     secondary = target_dir / f"test_{module_stem}_{func_suffix}.py"
     if not secondary.exists():
         return secondary, primary

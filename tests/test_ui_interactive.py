@@ -886,3 +886,89 @@ def test_apply_to_disk_writes_generated_to_source(tmp_path: Path):
     assert "test_h" in body
     assert "from demo import h" in body
     assert af.test_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 11. review-resolution regression tests (PR #4 gemini-code-assist)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_target_path_sanitizes_locals_for_nested_qualname(tmp_path: Path):
+    """qualname containing `<locals>` must produce a Windows-legal filename."""
+    project_root = tmp_path
+    test_dir = tmp_path / "tests"
+    test_dir.mkdir()
+    file = tmp_path / "src" / "mod.py"
+    file.parent.mkdir(parents=True)
+    file.write_text("def outer():\n    def inner(): pass\n", encoding="utf-8")
+    # Force the secondary-path branch by pre-creating the primary file.
+    (test_dir / "test_mod.py").write_text("# user's own file\n", encoding="utf-8")
+    func = UncoveredFunction(
+        file=file,
+        qualname="outer.<locals>.inner",
+        start_line=2,
+        end_line=2,
+        source="    def inner(): pass",
+    )
+
+    chosen, hint = _resolve_target_path(test_dir, func, project_root, ["src/"])
+
+    assert hint is not None  # primary exists, so we got a secondary
+    assert "<" not in chosen.name and ">" not in chosen.name
+    assert chosen.name == "test_mod_outer_locals_inner.py"
+
+
+def test_default_editor_fn_handles_editor_with_flags(monkeypatch, tmp_path: Path):
+    """``EDITOR='code --wait'`` must be tokenised, not treated as one binary name."""
+    from testgap.ui.interactive import default_editor_fn
+
+    monkeypatch.setenv("EDITOR", "echo --wait")
+    target = tmp_path / "scratch.py"
+    target.write_text("# placeholder", encoding="utf-8")
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr("testgap.ui.interactive.subprocess.run", fake_run)
+    default_editor_fn(target)
+
+    assert captured["args"] == ["echo", "--wait", str(target)]
+
+
+def test_keyboard_interrupt_during_llm_call_is_graceful(demo_project: Path, monkeypatch):
+    """Ctrl+C raised inside ``pipeline.process_function`` (LLM phase) must not crash."""
+    from testgap import pipeline as pipeline_mod
+
+    def boom(**_kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(pipeline_mod, "process_function", boom)
+
+    # The prompt would never be reached, but provide one anyway so the test fails
+    # loudly if the interrupt is somehow swallowed earlier.
+    def unreachable_prompt(message, *, choices, default):  # pragma: no cover
+        raise AssertionError("prompt reached despite KeyboardInterrupt during LLM call")
+
+    fn, _calls = _queued_completion([_pass_payload()])
+    client = LLMClient(model="fake/model", completion_fn=fn)
+
+    outcome = run_review_session(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+        prompt_fn=unreachable_prompt,
+        editor_fn=make_editor_writer(None),
+    )
+
+    assert outcome.quit_early is True
+    assert outcome.processed == 0
+    assert outcome.pending == 1
+    assert outcome.applied == []

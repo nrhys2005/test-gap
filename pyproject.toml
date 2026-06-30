@@ -69,3 +69,4 @@ select = ["E", "F", "I", "W", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/testgap/cli.py" = ["B008"]  # typer.Option in defaults is canonical
+"tests/test_ui_interactive.py" = ["F811"]  # pytest fixture re-export from test_pipeline.py

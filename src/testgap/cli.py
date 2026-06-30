@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import typer
@@ -18,6 +19,7 @@ from testgap.config.init_wizard import (
 from testgap.config.loader import CONFIG_FILENAME, ConfigError, load_config
 from testgap.generator import LLMClient
 from testgap.pipeline import DiffRunReport, FunctionSuggestion, run_diff
+from testgap.ui import run_review_session
 
 app = typer.Typer(
     name="testgap",
@@ -147,8 +149,22 @@ def diff(
         None, "--max-functions", "-n", help="Limit number of functions processed."
     ),
     path: Path | None = typer.Option(None, "--path", "-p", file_okay=False),
+    review: bool = typer.Option(
+        False,
+        "--review",
+        help=(
+            "Interactively review generated tests and apply them to disk. "
+            "Exits 0 even on quit (only exceptions return 1)."
+        ),
+    ),
 ) -> None:
-    """Analyze the diff and propose tests for uncovered changes (non-interactive)."""
+    """Analyze the diff and propose tests for uncovered changes.
+
+    Without ``--review``: non-interactive batch report (exit 1 if any
+    suggestion has no accepted cases).
+    With ``--review``: per-function 5-choice prompt (apply/skip/regenerate/
+    edit/quit). Exit 0 even on quit; only exceptions surface as exit 1.
+    """
     root = (path or Path.cwd()).resolve()
 
     try:
@@ -157,9 +173,31 @@ def diff(
         console.print(f"[red]✗[/] {escape(str(e))}")
         raise typer.Exit(code=1) from e
 
-    console.print(f"[bold]Analyzing diff[/] in {root}")
-
     llm_client = LLMClient(model=config.llm.model, max_retries=config.llm.max_retries)
+
+    if review:
+        if not sys.stdin.isatty():
+            console.print(
+                "[red]error:[/] --review requires a TTY (stdin must be interactive)"
+            )
+            raise typer.Exit(code=1)
+        console.print(f"[bold]Reviewing diff[/] in {root}")
+        try:
+            run_review_session(
+                project_root=root,
+                config=config,
+                llm_client=llm_client,
+                base_ref=base,
+                head_ref=head,
+                max_functions=max_functions,
+                console=console,
+            )
+        except Exception as e:
+            console.print(f"[red]✗[/] {escape(str(e))}")
+            raise typer.Exit(code=1) from e
+        return
+
+    console.print(f"[bold]Analyzing diff[/] in {root}")
 
     try:
         report = run_diff(

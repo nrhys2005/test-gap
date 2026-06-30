@@ -30,13 +30,21 @@ TestGap은 PR 또는 로컬 브랜치의 **변경된 코드 중 테스트가 부
 ## 설치
 
 ```bash
-# 개발 중인 alpha — 로컬 설치
+# PyPI alpha (권장)
+pip install --pre testgap[llm]
+```
+
+PyPI: <https://pypi.org/project/testgap/>
+
+> `--pre` 가 필요한 이유는 현재 alpha 릴리스(`0.1.0aN`)이기 때문입니다. 안정 버전(`0.1.0`) 이후로는 `pip install testgap[llm]` 만으로 설치됩니다.
+
+### 소스에서 설치 (최신 main / 개발용)
+
+```bash
 git clone https://github.com/nrhys2005/test-gap.git
 cd test-gap
 pip install -e ".[llm]"
 ```
-
-> `pip install testgap[llm]` (PyPI 배포)는 v0.2에서 제공됩니다.
 
 **필수 환경**
 - Python 3.10 이상
@@ -273,9 +281,9 @@ v0.1은 자동 적용 없이 콘솔 출력만 합니다. `--review` 인터랙티
 - ✅ LiteLLM provider 추상화
 - ✅ 실행 통과 검증 + 부분 통과 처리 + 1회 재생성
 - ✅ `max_cost_per_run` 비용 가드
-- ⏳ `testgap diff --review` 인터랙티브 모드
+- ✅ `testgap diff --review` 인터랙티브 모드 (a/s/r/e/q)
+- ✅ PyPI alpha 배포 (`pip install --pre testgap`)
 - ⏳ `.testgap/logs/` 세션 로그
-- ⏳ PyPI 배포
 
 ### v0.2.0 — CI Integration
 

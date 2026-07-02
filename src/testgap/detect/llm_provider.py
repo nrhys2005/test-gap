@@ -316,10 +316,13 @@ def _ollama_provider_entries(
                 )
             )
 
-    # Extra pulled non-recommended models — surface each as RUNNABLE for visibility.
-    recommended_lower = {m.lower() for m in RECOMMENDED_OLLAMA_MODELS}
+    # Extra pulled models — surface each as RUNNABLE for visibility.
+    # Only exclude the single `matched` model already registered above; other
+    # recommended models the user has pulled (e.g. both 7b AND 14b) should still
+    # appear so the user can pick between them.
+    matched_lower = matched.lower() if matched else None
     for name in scan.pulled_models:
-        if name.lower() in recommended_lower:
+        if matched_lower is not None and name.lower() == matched_lower:
             continue
         entries.append(
             Provider(

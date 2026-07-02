@@ -218,6 +218,33 @@ def test_detect_surfaces_non_recommended_pulled_models():
     assert llama.kind == ProviderKind.OLLAMA
 
 
+def test_detect_surfaces_multiple_pulled_recommended_models():
+    """Regression: previously all recommended models were filtered from the extra
+    loop, so only the top-priority match appeared. Now every pulled model shows,
+    with only the single ``matched`` entry deduplicated.
+    """
+    # User has pulled two recommended models (7b + 14b) and one non-recommended
+    # (llama3.1:8b). All three should appear as PULLED_RUNNABLE.
+    providers = detect_llm_providers(
+        env={},
+        scan_fn=_scan(
+            pulled=("qwen2.5-coder:7b", "qwen2.5-coder:14b", "llama3.1:8b"),
+        ),
+    )
+    pulled_runnable_models = [
+        p.model
+        for p in providers
+        if p.status == ProviderStatus.PULLED_RUNNABLE
+    ]
+    # 7b matches first in RECOMMENDED_OLLAMA_MODELS priority so it's the top.
+    # 14b and llama3.1:8b must both surface as additional entries.
+    assert "ollama/qwen2.5-coder:7b" in pulled_runnable_models
+    assert "ollama/qwen2.5-coder:14b" in pulled_runnable_models
+    assert "ollama/llama3.1:8b" in pulled_runnable_models
+    # And no duplicate of the matched model.
+    assert pulled_runnable_models.count("ollama/qwen2.5-coder:7b") == 1
+
+
 def test_detect_not_pulled_when_ollama_up_but_no_recommended():
     providers = detect_llm_providers(env={}, scan_fn=_scan(pulled=("mistral:7b",)))
     top = providers[0]

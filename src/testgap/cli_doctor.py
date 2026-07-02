@@ -224,8 +224,8 @@ def _check_cost_estimate(root: Path, config: TestGapConfig | None) -> DoctorChec
     per_fn_tokens = 3000  # ballpark: prompt + few-shot + expected output
     rounds = 2  # 1st pass + potential retry
     estimated = len(functions) * per_fn_tokens * rounds * unit_cost
-    # Additional refinement using ``_estimate_tokens`` on function source when
-    # available — smoothes the estimate for large functions.
+    # Display the token count of the first uncovered function for user context
+    # (does not affect the ``estimated`` value above — refinement is a v0.2+ TODO).
     detail_lines = [
         f"{len(functions)} function(s)",
         f"unit≈${unit_cost:.6f}/token",

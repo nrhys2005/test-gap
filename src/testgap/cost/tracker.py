@@ -24,18 +24,25 @@ class CostTracker:
 
     @property
     def remaining(self) -> float:
+        # ``max_cost_per_run == 0`` is the "no cap" sentinel — see LLMConfig.
+        if self.max_cost_per_run == 0:
+            return float("inf")
         return max(0.0, round(self.max_cost_per_run - self.spent, 6))
 
     def would_exceed(self, estimated: float) -> bool:
+        if self.max_cost_per_run == 0:
+            return False
         return (self.spent + estimated) > self.max_cost_per_run
 
     def near_limit(self, ratio: float = 0.8) -> bool:
+        if self.max_cost_per_run == 0:
+            return False
         return self.spent >= self.max_cost_per_run * ratio
 
     def record(
         self, *, label: str, cost_usd: float, input_tokens: int = 0, output_tokens: int = 0
     ) -> CostEntry:
-        if self.spent + cost_usd > self.max_cost_per_run:
+        if self.max_cost_per_run > 0 and self.spent + cost_usd > self.max_cost_per_run:
             raise BudgetExceeded(
                 f"recording ${cost_usd:.4f} would exceed budget "
                 f"${self.max_cost_per_run:.2f} (already spent ${self.spent:.4f})"

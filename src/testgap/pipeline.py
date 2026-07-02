@@ -28,6 +28,10 @@ from testgap.generator import (
 from testgap.generator.prompt import PreviousFailure, PromptContext, _estimate_tokens
 from testgap.validator import TestCaseResult, ValidatorResult, run_pytest_on_file
 
+# Consecutive-LLM-failure threshold for provider-unhealthy early-exit.
+# Shared between ``run_diff`` (batch) and ``ui.interactive.run_review_session``.
+CONSECUTIVE_LLM_FAILURE_LIMIT = 2
+
 
 @dataclass
 class FunctionSuggestion:
@@ -40,6 +44,11 @@ class FunctionSuggestion:
     accepted_cases: list[TestCaseResult] = field(default_factory=list)
     discarded_cases: list[TestCaseResult] = field(default_factory=list)
     retry_skipped_reason: str | None = None
+    # True when any ``_call_and_validate`` round returned ``_CallFailure(kind="llm")``
+    # for this function. Used by ``run_diff`` / ``run_review_session`` to decide the
+    # provider-unhealthy early-exit. Parse / budget failures do NOT flip this flag —
+    # they are not LLM-provider fault.
+    llm_failure_observed: bool = False
 
     @property
     def succeeded(self) -> bool:
@@ -77,6 +86,11 @@ class DiffRunReport:
     suggestions: list[FunctionSuggestion] = field(default_factory=list)
     cost_total: float = 0.0
     skipped_reason: str | None = None
+    # Set when the provider-unhealthy counter tripped mid-run. Consumers use it
+    # to render a stop-early banner and to inform users they should try
+    # ``testgap doctor``.
+    provider_unhealthy: bool = False
+    unhealthy_reason: str | None = None
 
 
 @dataclass
@@ -231,6 +245,9 @@ def run_diff(
     test_dirs = prepare_test_dirs(config, project_root)
 
     suggestions: list[FunctionSuggestion] = []
+    provider_unhealthy = False
+    unhealthy_reason: str | None = None
+    consecutive_llm_failures = 0
     for func in functions:
         suggestion = _process_function(
             func=func,
@@ -241,6 +258,25 @@ def run_diff(
             test_dirs=test_dirs,
         )
         suggestions.append(suggestion)
+
+        # Provider-unhealthy counter. Only "LLM failure observed AND nothing
+        # accepted" counts as a strike; any acceptance (full or partial) resets.
+        # Parse / budget failures do not touch ``llm_failure_observed`` so they
+        # also reset the streak.
+        if suggestion.llm_failure_observed and not suggestion.accepted_cases:
+            consecutive_llm_failures += 1
+        else:
+            consecutive_llm_failures = 0
+
+        if consecutive_llm_failures >= CONSECUTIVE_LLM_FAILURE_LIMIT:
+            provider_unhealthy = True
+            last_error = suggestion.error or "LLM call failed"
+            unhealthy_reason = (
+                f"provider unhealthy: {consecutive_llm_failures} consecutive "
+                f"LLM failures ({last_error})"
+            )
+            break
+
         if tracker.remaining <= 0:
             break
 
@@ -252,6 +288,8 @@ def run_diff(
         covered_total=diff_meta.covered_total,
         suggestions=suggestions,
         cost_total=tracker.spent,
+        provider_unhealthy=provider_unhealthy,
+        unhealthy_reason=unhealthy_reason,
     )
 
 
@@ -411,6 +449,9 @@ def _call_and_validate(
     try:
         response = llm_client.complete(messages)
     except LLMError as e:
+        # Flag the provider-fault observation on the suggestion so ``run_diff`` /
+        # ``run_review_session`` can drive the consecutive-failure counter.
+        suggestion.llm_failure_observed = True
         return _CallFailure(kind="llm", message=str(e))
 
     suggestion.attempts += 1

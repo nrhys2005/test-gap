@@ -20,7 +20,9 @@ class CoverageConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     model: str = "anthropic/claude-sonnet-4-6"
-    max_cost_per_run: float = Field(default=2.0, gt=0)
+    # ``0`` means "no cap" — useful for local models (Ollama) where per-call cost
+    # is effectively zero. See ``CostTracker`` for the unlimited-budget branch.
+    max_cost_per_run: float = Field(default=2.0, ge=0)
     max_retries: int = Field(default=2, ge=0, le=5)
 
 

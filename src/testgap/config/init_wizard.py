@@ -1,4 +1,13 @@
+"""Bootstrap helpers for ``testgap init`` (project analysis + config write).
+
+Provider inspection is delegated to ``testgap.detect.llm_provider`` so the same
+detection powers the wizard, ``testgap doctor`` and future v0.3 hardware checks.
+The public ``suggest_model()`` / ``provider_status()`` signatures are preserved
+for CLI / test back-compat.
+"""
+
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +19,19 @@ from testgap.config.schema import (
     ProjectConfig,
     TestGapConfig,
 )
-from testgap.detect import detect_layout, detect_pytest, detect_source_paths, detect_test_dirs
+from testgap.detect import (
+    DetectCache,
+    Provider,
+    RunnableCacheEntry,
+    detect_layout,
+    detect_llm_providers,
+    detect_pytest,
+    detect_source_paths,
+    detect_test_dirs,
+    probe_model_runnable,
+)
+
+FALLBACK_MODEL = "ollama/qwen2.5-coder:7b"
 
 
 @dataclass
@@ -43,35 +64,54 @@ def analyze(root: Path) -> DetectionReport:
     )
 
 
-_KNOWN_PROVIDERS = (
-    ("anthropic/claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
-    ("openai/gpt-4o", "OPENAI_API_KEY"),
-    ("gemini/gemini-2.0-flash", "GEMINI_API_KEY"),
-    ("ollama/qwen2.5-coder", None),
-)
+def suggest_model(project_root: Path | None = None) -> str:
+    """Return the highest-priority provider's model id.
 
-
-def suggest_model() -> str:
-    """Pick the first provider whose API key is set in env; fall back to Ollama."""
-    for model, env_var in _KNOWN_PROVIDERS:
-        if env_var is None:
-            continue
-        if os.environ.get(env_var):
-            return model
-    return "ollama/qwen2.5-coder"
+    ``project_root`` is accepted for signature stability (v0.3 may cache probes
+    per-project); it is unused today because the shared user-home cache is
+    consulted transparently by :func:`detect_providers_for_ui`.
+    """
+    _ = project_root  # unused — signature kept for back-compat
+    providers = detect_llm_providers()
+    if not providers:
+        return FALLBACK_MODEL
+    return providers[0].model
 
 
 def provider_status() -> list[tuple[str, str]]:
-    """Return (model, status) pairs for display in the wizard."""
-    rows: list[tuple[str, str]] = []
-    for model, env_var in _KNOWN_PROVIDERS:
-        if env_var is None:
-            rows.append((model, "local model"))
-        elif os.environ.get(env_var):
-            rows.append((model, f"{env_var} found"))
-        else:
-            rows.append((model, f"{env_var} not set"))
-    return rows
+    """Return ``(model, hint)`` pairs for the wizard's rendered table."""
+    return [(p.model, p.hint) for p in detect_llm_providers()]
+
+
+def detect_providers_for_ui(project_root: Path | None = None) -> list[Provider]:
+    """Wizard/doctor-facing provider list. Consults the shared runnability cache.
+
+    ``project_root`` is accepted for signature stability but unused: the cache
+    location follows XDG and is machine-shared (see ``DetectCache.default_path``).
+    """
+    _ = project_root  # unused — signature kept for back-compat
+    cache = DetectCache()
+
+    def runnable(endpoint: str, model: str) -> bool:
+        entry = cache.load_runnable(model, endpoint)
+        if entry is not None:
+            return entry.runnable
+        status, err = probe_model_runnable(endpoint, model)
+        cache.store_runnable(
+            RunnableCacheEntry(
+                model=model,
+                endpoint=endpoint,
+                runnable=(status == "runnable"),
+                checked_at=time.time(),
+                error=err,
+            )
+        )
+        return status == "runnable"
+
+    return detect_llm_providers(
+        env=dict(os.environ),
+        runnable_check_fn=runnable,
+    )
 
 
 def build_config(

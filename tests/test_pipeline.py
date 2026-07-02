@@ -346,6 +346,298 @@ def test_retry_skipped_when_budget_would_exceed(demo_project: Path):
     assert s.succeeded is True
 
 
+def _multi_function_project(demo_project: Path, monkeypatch, n: int) -> None:
+    """Monkeypatch ``discover_targets`` to return ``n`` copies of the single real
+    uncovered function so tests can exercise multi-function flows deterministically.
+    """
+    from testgap import pipeline as pipeline_mod
+    from testgap.coverage import UncoveredFunction
+
+    real_funcs, meta = pipeline_mod.discover_targets(
+        project_root=demo_project,
+        config=_config(),
+        base_ref="main",
+        head_ref="HEAD",
+        max_functions=None,
+    )
+    assert real_funcs, "demo_project should have exactly one uncovered function"
+    base = real_funcs[0]
+    duplicates = [
+        UncoveredFunction(
+            file=base.file,
+            qualname="sub",  # matches the real function; validation passes on success
+            start_line=base.start_line,
+            end_line=base.end_line,
+            source=base.source,
+            uncovered_lines=base.uncovered_lines,
+            has_branch=base.has_branch,
+        )
+        for _ in range(n)
+    ]
+    monkeypatch.setattr(
+        pipeline_mod, "discover_targets", lambda **kw: (duplicates, meta)
+    )
+
+
+def _raising_completion(exc_factory):
+    def fn(**kwargs):
+        raise exc_factory()
+
+    return fn
+
+
+def test_provider_unhealthy_skips_remaining_functions(demo_project: Path, monkeypatch):
+    """Two consecutive full-LLM-failures trigger provider-unhealthy early-exit."""
+    from testgap.generator import LLMError
+
+    _multi_function_project(demo_project, monkeypatch, n=5)
+    client = LLMClient(
+        model="fake/model",
+        completion_fn=_raising_completion(lambda: LLMError("500 server error")),
+        max_retries=0,
+    )
+
+    report = run_diff(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+    )
+
+    assert report.provider_unhealthy is True
+    assert report.unhealthy_reason is not None
+    assert "consecutive" in report.unhealthy_reason
+    # Break after 2nd failure — third function must NOT be processed.
+    assert len(report.suggestions) == 2
+    for s in report.suggestions:
+        assert s.llm_failure_observed is True
+        assert s.accepted_cases == []
+
+
+def test_consecutive_llm_failures_reset_after_success(demo_project: Path, monkeypatch):
+    """fail → success → fail → success — counter never reaches 2 → complete run."""
+    from testgap.generator import LLMError
+
+    _multi_function_project(demo_project, monkeypatch, n=4)
+    good_payload = _payload(
+        [_test_entry("test_sub_ok", "from demo.calc import sub\n    assert sub(5,3)==2")]
+    )
+    # Sequence per function: LLMError, success, LLMError, success. Each fn issues
+    # a single LLM call (max_retries=0, no partial-pass retry because success is
+    # full-pass or full-LLM-fail).
+    seq: list[LLMError | str] = [LLMError("boom"), good_payload, LLMError("boom"), good_payload]
+    call_state = {"i": 0}
+
+    def scripted(**kwargs):
+        idx = call_state["i"]
+        call_state["i"] += 1
+        step = seq[idx]
+        if isinstance(step, LLMError):
+            raise step
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=f"```json\n{step}\n```")
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=80),
+            _hidden_params={"response_cost": 0.001},
+        )
+
+    client = LLMClient(model="fake/model", completion_fn=scripted, max_retries=0)
+    report = run_diff(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+    )
+    # Counter timeline: +1, reset, +1, reset — never reaches 2, so no early exit.
+    assert report.provider_unhealthy is False
+    assert len(report.suggestions) == 4
+
+
+def test_partial_pass_resets_consecutive_counter(demo_project: Path, monkeypatch):
+    """fn1 partial-pass → fn2 full-LLM-fail → fn3 partial-pass. No early exit."""
+    from testgap.generator import LLMError
+
+    _multi_function_project(demo_project, monkeypatch, n=3)
+
+    partial = _payload(
+        [
+            _test_entry(
+                "test_sub_pass",
+                "from demo.calc import sub\n    assert sub(5, 3) == 2",
+            ),
+            _test_entry("test_sub_fail", "assert False, 'x'"),
+        ]
+    )
+    retry_fail = _payload(
+        [_test_entry("test_sub_retry_fail", "assert False, 'still fails'")]
+    )
+
+    # For each function process_function issues up to 2 LLM calls: partial pass
+    # triggers a retry. So per function we need [partial, retry_fail] payloads
+    # OR raise LLMError. Scripted plan:
+    #   fn1: partial → retry_fail (accepted_cases non-empty → counter reset)
+    #   fn2: LLMError (first call raises → llm_failure_observed=True, no accepted → +1)
+    #   fn3: partial → retry_fail (counter reset)
+    step_state = {"i": 0}
+
+    def scripted(**kwargs):
+        i = step_state["i"]
+        step_state["i"] += 1
+        # Sequence of responses. LLMError instances raised; strings JSON'd.
+        seq = [partial, retry_fail, LLMError("fn2 boom"), partial, retry_fail]
+        item = seq[i]
+        if isinstance(item, LLMError):
+            raise item
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=f"```json\n{item}\n```")
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=80),
+            _hidden_params={"response_cost": 0.001},
+        )
+
+    client = LLMClient(model="fake/model", completion_fn=scripted, max_retries=0)
+    report = run_diff(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+    )
+
+    assert report.provider_unhealthy is False
+    assert len(report.suggestions) == 3
+    # fn1 & fn3 accepted at least one case
+    assert report.suggestions[0].accepted_cases
+    assert report.suggestions[2].accepted_cases
+    # fn2 completely failed on LLM
+    fn2 = report.suggestions[1]
+    assert fn2.llm_failure_observed is True
+    assert fn2.accepted_cases == []
+
+
+def test_two_round_llm_failure_counts_once(demo_project: Path, monkeypatch):
+    """A single function whose 1st AND 2nd round both raise LLMError counts +1."""
+    from testgap.generator import LLMError
+
+    _multi_function_project(demo_project, monkeypatch, n=1)
+    client = LLMClient(
+        model="fake/model",
+        completion_fn=_raising_completion(lambda: LLMError("still 500")),
+        max_retries=1,  # 2 calls total per invocation
+    )
+    report = run_diff(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+    )
+    assert len(report.suggestions) == 1
+    # Counter should have gone from 0 to 1 (still under threshold).
+    assert report.provider_unhealthy is False
+    assert report.suggestions[0].llm_failure_observed is True
+
+
+def test_llm_failure_observed_flag_set_on_first_round_llm_error(
+    demo_project: Path, monkeypatch
+):
+    from testgap.generator import LLMError
+
+    _multi_function_project(demo_project, monkeypatch, n=1)
+    client = LLMClient(
+        model="fake/model",
+        completion_fn=_raising_completion(lambda: LLMError("boom")),
+        max_retries=0,
+    )
+    report = run_diff(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+    )
+    assert report.suggestions[0].llm_failure_observed is True
+
+
+def test_llm_failure_observed_flag_set_on_second_round_llm_error(
+    demo_project: Path, monkeypatch
+):
+    """1st round succeeds partially → 2nd round LLMError → flag True + acceptance kept."""
+    from testgap.generator import LLMError
+
+    _multi_function_project(demo_project, monkeypatch, n=1)
+
+    partial = _payload(
+        [
+            _test_entry(
+                "test_sub_pass",
+                "from demo.calc import sub\n    assert sub(5, 3) == 2",
+            ),
+            _test_entry("test_sub_fail", "assert False, 'x'"),
+        ]
+    )
+    steps = {"i": 0}
+
+    def scripted(**kwargs):
+        i = steps["i"]
+        steps["i"] += 1
+        if i == 0:
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=f"```json\n{partial}\n```")
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=100, completion_tokens=80),
+                _hidden_params={"response_cost": 0.001},
+            )
+        raise LLMError("retry boom")
+
+    client = LLMClient(model="fake/model", completion_fn=scripted, max_retries=0)
+    report = run_diff(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+    )
+    s = report.suggestions[0]
+    assert s.llm_failure_observed is True
+    # 1st-round pass survived the retry failure.
+    assert s.accepted_cases
+
+
+def test_llm_failure_observed_flag_false_for_parse_only_failures(
+    demo_project: Path, monkeypatch
+):
+    """LLM answers but the response cannot be parsed → flag stays False."""
+    _multi_function_project(demo_project, monkeypatch, n=1)
+
+    def unparseable(**kwargs):
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="not JSON, not code — nothing usable")
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=80),
+            _hidden_params={"response_cost": 0.001},
+        )
+
+    client = LLMClient(model="fake/model", completion_fn=unparseable, max_retries=0)
+    report = run_diff(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+    )
+    s = report.suggestions[0]
+    assert s.llm_failure_observed is False
+    assert s.error is not None and s.error.startswith("parse:")
+
+
 def test_pipeline_succeeded_means_any_accepted(demo_project: Path):
     """Documents the BREAKING semantic change: succeeded ↔ at least one accepted case."""
     first = _payload([

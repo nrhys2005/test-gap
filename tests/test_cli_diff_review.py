@@ -133,3 +133,69 @@ def test_diff_help_lists_review_option():
     assert result.exit_code == 0
     assert "--review" in result.stdout
     assert "Interactively review" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# TG-401 — verbose / LLM-error summary
+# ---------------------------------------------------------------------------
+
+
+def test_diff_no_verbose_summarizes_llm_error(tmp_path: Path, monkeypatch):
+    """LLMError → one-line summary; no traceback rendered."""
+    _write_min_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    from testgap.generator import LLMError
+
+    def boom(**kwargs):
+        raise LLMError('{"error": {"message": "quota exceeded"}}')
+
+    monkeypatch.setattr(cli_mod, "run_diff", boom)
+
+    result = runner.invoke(app, ["diff", "--path", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "LLM error" in result.stdout
+    assert "quota exceeded" in result.stdout
+    # Non-verbose must not dump a traceback header.
+    assert "Traceback" not in result.stdout
+
+
+def test_diff_verbose_shows_traceback(tmp_path: Path, monkeypatch):
+    """``--verbose`` renders the full traceback via ``console.print_exception``."""
+    _write_min_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    from testgap.generator import LLMError
+
+    def boom(**kwargs):
+        raise LLMError("model not found")
+
+    monkeypatch.setattr(cli_mod, "run_diff", boom)
+
+    result = runner.invoke(app, ["diff", "--path", str(tmp_path), "--verbose"])
+    assert result.exit_code == 1
+    # rich's print_exception renders a "Traceback" header.
+    assert "Traceback" in result.stdout
+
+
+def test_setup_litellm_logging_silences_verbose_default():
+    """After ``main`` runs at least once, LiteLLM logger sits at ERROR."""
+    import logging
+
+    from testgap.cli import _setup_litellm_logging
+
+    _setup_litellm_logging(verbose=False)
+    for name in ("LiteLLM", "litellm", "httpx", "urllib3.connectionpool"):
+        assert logging.getLogger(name).level == logging.ERROR
+
+
+def test_setup_litellm_logging_verbose_enables_debug():
+    import logging
+
+    from testgap.cli import _setup_litellm_logging
+
+    _setup_litellm_logging(verbose=True)
+    try:
+        assert logging.getLogger("LiteLLM").level == logging.DEBUG
+    finally:
+        _setup_litellm_logging(verbose=False)  # restore for later tests

@@ -39,3 +39,15 @@ def test_zero_cost_runs_dont_advance_budget():
         tracker.record(label=f"f{i}", cost_usd=0.0)
     assert tracker.spent == 0.0
     assert tracker.remaining == 0.5
+
+
+def test_zero_budget_is_unlimited():
+    """TG-401 D1: ``max_cost_per_run=0`` means "no cap" (Ollama-friendly)."""
+    tracker = CostTracker(max_cost_per_run=0)
+    # Massive cost must not raise.
+    tracker.record(label="f", cost_usd=999.0)
+    assert tracker.spent == 999.0
+    assert tracker.remaining == float("inf")
+    assert tracker.would_exceed(10_000.0) is False
+    # ``near_limit`` should return False so ``run_diff`` never bails out.
+    assert tracker.near_limit(0.8) is False

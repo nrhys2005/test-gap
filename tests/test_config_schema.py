@@ -26,9 +26,15 @@ def test_threshold_bounds():
         TestGapConfig.model_validate({"coverage": {"threshold": -1}})
 
 
-def test_max_cost_must_be_positive():
+def test_max_cost_zero_allowed():
+    """0 means "no cap" — used by Ollama / local models. See TG-401 D1."""
+    config = TestGapConfig.model_validate({"llm": {"max_cost_per_run": 0}})
+    assert config.llm.max_cost_per_run == 0
+
+
+def test_max_cost_negative_rejected():
     with pytest.raises(ValidationError):
-        TestGapConfig.model_validate({"llm": {"max_cost_per_run": 0}})
+        TestGapConfig.model_validate({"llm": {"max_cost_per_run": -1}})
 
 
 def test_max_tests_per_function_bounds():

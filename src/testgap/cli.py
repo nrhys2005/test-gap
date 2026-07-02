@@ -1,3 +1,4 @@
+import logging
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from testgap import __version__
+from testgap.cli_doctor import run_doctor
 from testgap.config.init_wizard import (
     analyze,
     build_config,
@@ -17,7 +19,7 @@ from testgap.config.init_wizard import (
     write_config,
 )
 from testgap.config.loader import CONFIG_FILENAME, ConfigError, load_config
-from testgap.generator import LLMClient
+from testgap.generator import LLMClient, LLMError, summarize_llm_error
 from testgap.pipeline import DiffRunReport, FunctionSuggestion, run_diff
 from testgap.ui import run_review_session
 
@@ -28,6 +30,20 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+# Loggers whose default INFO/WARN levels bury useful output at test-generation time.
+# ``main()`` silences them once per process — verbose mode lifts the gag.
+_NOISY_LITELLM_LOGGERS = ("LiteLLM", "litellm", "httpx", "urllib3.connectionpool")
+
+
+def _setup_litellm_logging(*, verbose: bool = False) -> None:
+    """Quiet LiteLLM's chatty loggers unless the user asked for verbose output.
+
+    Called once from the ``@app.callback`` — see the plan's D4 rationale.
+    """
+    level = logging.DEBUG if verbose else logging.ERROR
+    for name in _NOISY_LITELLM_LOGGERS:
+        logging.getLogger(name).setLevel(level)
 
 
 def _version_callback(value: bool) -> None:
@@ -42,7 +58,7 @@ def main(
         None, "--version", callback=_version_callback, is_eager=True, help="Show version and exit."
     ),
 ) -> None:
-    pass
+    _setup_litellm_logging(verbose=False)
 
 
 @app.command()
@@ -157,6 +173,12 @@ def diff(
             "Exits 0 even on quit (only exceptions return 1)."
         ),
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show full tracebacks and LiteLLM logs on error.",
+    ),
 ) -> None:
     """Analyze the diff and propose tests for uncovered changes.
 
@@ -165,6 +187,9 @@ def diff(
     With ``--review``: per-function 5-choice prompt (apply/skip/regenerate/
     edit/quit). Exit 0 even on quit; only exceptions surface as exit 1.
     """
+    if verbose:
+        _setup_litellm_logging(verbose=True)
+
     root = (path or Path.cwd()).resolve()
 
     try:
@@ -192,8 +217,17 @@ def diff(
                 max_functions=max_functions,
                 console=console,
             )
+        except LLMError as e:
+            console.print(
+                f"[red]✗ LLM error:[/] {escape(summarize_llm_error(e))}"
+            )
+            if verbose:
+                console.print_exception()
+            raise typer.Exit(code=1) from e
         except Exception as e:
             console.print(f"[red]✗[/] {escape(str(e))}")
+            if verbose:
+                console.print_exception()
             raise typer.Exit(code=1) from e
         return
 
@@ -208,14 +242,26 @@ def diff(
             head_ref=head,
             max_functions=max_functions,
         )
+    except LLMError as e:
+        console.print(f"[red]✗ LLM error:[/] {escape(summarize_llm_error(e))}")
+        if verbose:
+            console.print_exception()
+        raise typer.Exit(code=1) from e
     except Exception as e:  # surface user-facing errors from coverage/git layers
         console.print(f"[red]✗[/] {escape(str(e))}")
+        if verbose:
+            console.print_exception()
         raise typer.Exit(code=1) from e
 
     _print_diff_report(report)
 
     if report.suggestions and not all(s.succeeded for s in report.suggestions):
         raise typer.Exit(code=1)
+
+
+# Register ``doctor`` from the dedicated module. ``run_doctor`` accepts the
+# typer options directly so we bind it as-is.
+app.command(name="doctor", help="Diagnose the local TestGap environment.")(run_doctor)
 
 
 def _print_diff_report(report: DiffRunReport) -> None:
@@ -238,6 +284,12 @@ def _print_diff_report(report: DiffRunReport) -> None:
 
     console.print()
     console.print(f"[dim]LLM cost this run:[/] ${report.cost_total:.4f}")
+    if report.provider_unhealthy:
+        reason = report.unhealthy_reason or "consecutive LLM failures"
+        console.print(
+            f"[yellow]![/] provider unhealthy — skipped remaining functions "
+            f"({escape(reason)}). Try: testgap doctor"
+        )
 
 
 def _print_suggestion(idx: int, total: int, s: FunctionSuggestion) -> None:

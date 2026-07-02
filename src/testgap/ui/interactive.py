@@ -28,7 +28,11 @@ from testgap.config.schema import TestGapConfig
 from testgap.cost import CostTracker
 from testgap.coverage import UncoveredFunction
 from testgap.generator import GeneratedTest, GeneratedTestSet, LLMClient
-from testgap.pipeline import DiffMetadata, FunctionSuggestion
+from testgap.pipeline import (
+    CONSECUTIVE_LLM_FAILURE_LIMIT,
+    DiffMetadata,
+    FunctionSuggestion,
+)
 from testgap.validator import run_pytest_on_file
 from testgap.validator.runner import ValidatorError
 
@@ -58,6 +62,13 @@ class ReviewOutcome:
     cost_total: float = 0.0
     processed: int = 0
     pending: int = 0
+    # Extended quit / provider-unhealthy metadata (TG-401 P0-2).
+    # ``quit_reason`` is ``"user_quit"`` for explicit ``q`` presses,
+    # ``"provider_unhealthy"`` when the consecutive-LLM-failure counter fires, and
+    # ``None`` otherwise (including KeyboardInterrupt — kept as-is for back-compat).
+    quit_reason: str | None = None
+    provider_unhealthy: bool = False
+    unhealthy_reason: str | None = None
 
 
 PromptFn = Callable[..., str]
@@ -141,6 +152,7 @@ def run_review_session(
     outcome = ReviewOutcome()
 
     total = len(functions)
+    consecutive_llm_failures = 0
     for i, func in enumerate(functions, 1):
         try:
             suggestion = pipeline.process_function(
@@ -178,6 +190,29 @@ def run_review_session(
             outcome.skipped.append(func.qualname)
         elif one.action == "quit":
             outcome.quit_early = True
+            outcome.quit_reason = "user_quit"
+            outcome.pending = total - i
+            break
+
+        # Provider-unhealthy counter — mirrors ``pipeline.run_diff``. Any acceptance
+        # (full or partial) resets the streak; only observed LLM failures without
+        # any accepted case count as strikes.
+        if suggestion.llm_failure_observed and not suggestion.accepted_cases:
+            consecutive_llm_failures += 1
+        else:
+            consecutive_llm_failures = 0
+
+        if consecutive_llm_failures >= CONSECUTIVE_LLM_FAILURE_LIMIT:
+            console.print(
+                "[yellow]![/] provider unhealthy — stopping review session. "
+                "Try: testgap doctor"
+            )
+            outcome.quit_early = True
+            outcome.quit_reason = "provider_unhealthy"
+            outcome.provider_unhealthy = True
+            outcome.unhealthy_reason = (
+                f"{consecutive_llm_failures} consecutive LLM failures"
+            )
             outcome.pending = total - i
             break
 
@@ -611,5 +646,10 @@ def _print_session_summary(console: Console, outcome: ReviewOutcome) -> None:
                 f"      [dim]consider merging into {escape(str(af.merge_hint))}[/]"
             )
     console.print(f"  [dim]Total cost: ${outcome.cost_total:.4f}[/]")
+    if outcome.provider_unhealthy:
+        console.print(
+            "  [yellow]![/] provider unhealthy — skipped remaining functions. "
+            "Try: testgap doctor"
+        )
     if outcome.quit_early:
         console.print("  [yellow]![/] session ended early")

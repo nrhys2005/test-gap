@@ -942,6 +942,180 @@ def test_default_editor_fn_handles_editor_with_flags(monkeypatch, tmp_path: Path
     assert captured["args"] == ["echo", "--wait", str(target)]
 
 
+# ---------------------------------------------------------------------------
+# 12. TG-401 P0-2 — provider-unhealthy early exit in review session
+# ---------------------------------------------------------------------------
+
+
+def _stub_llm_failure_suggestion(func):
+    """Build a ``FunctionSuggestion`` that emulates a full LLM failure."""
+    from testgap.pipeline import FunctionSuggestion
+
+    return FunctionSuggestion(
+        function=func,
+        generated=None,
+        validator_result=None,
+        cost_usd=0.0,
+        error="llm: 500 server error",
+        attempts=1,
+        llm_failure_observed=True,
+    )
+
+
+def _stub_partial_pass_suggestion(func):
+    from testgap.generator import GeneratedTest, GeneratedTestSet
+    from testgap.pipeline import FunctionSuggestion
+    from testgap.validator.result import TestCaseResult, TestOutcome, ValidatorResult
+
+    accepted = TestCaseResult(name="test_ok", outcome=TestOutcome.PASS)
+    vr = ValidatorResult(cases=[accepted])
+    return FunctionSuggestion(
+        function=func,
+        generated=GeneratedTestSet(
+            imports=[],
+            tests=[GeneratedTest(name="test_ok", purpose="ok", code="def test_ok(): pass")],
+        ),
+        validator_result=vr,
+        cost_usd=0.001,
+        accepted_cases=[accepted],
+        attempts=1,
+        # partial pass still observed an LLM failure in 2nd round — but that is
+        # not the flag path exercised here; we care only that accepted_cases
+        # resets the streak, so we keep this bool True to prove that.
+        llm_failure_observed=True,
+    )
+
+
+def _multi_targets(demo_project: Path, monkeypatch, n: int, *, qualname: str = "sub"):
+    from testgap import pipeline as pipeline_mod
+    from testgap.coverage import UncoveredFunction
+
+    real_funcs, meta = pipeline_mod.discover_targets(
+        project_root=demo_project,
+        config=_config(),
+        base_ref="main",
+        head_ref="HEAD",
+        max_functions=None,
+    )
+    base = real_funcs[0]
+    stubs = [
+        UncoveredFunction(
+            file=base.file,
+            qualname=qualname,
+            start_line=base.start_line,
+            end_line=base.end_line,
+            source=base.source,
+            uncovered_lines=base.uncovered_lines,
+            has_branch=base.has_branch,
+        )
+        for _ in range(n)
+    ]
+    monkeypatch.setattr(pipeline_mod, "discover_targets", lambda **kw: (stubs, meta))
+
+
+def test_review_session_stops_on_unhealthy_provider(demo_project: Path, monkeypatch):
+    _multi_targets(demo_project, monkeypatch, n=5)
+
+    from testgap import pipeline as pipeline_mod
+
+    def stub_pf(**kwargs):
+        return _stub_llm_failure_suggestion(kwargs["func"])
+
+    monkeypatch.setattr(pipeline_mod, "process_function", stub_pf)
+    from testgap.ui import interactive as ui_mod
+
+    monkeypatch.setattr(ui_mod.pipeline, "process_function", stub_pf)
+
+    fn, _calls = _queued_completion([_pass_payload()])
+    client = LLMClient(model="fake/model", completion_fn=fn)
+    console = Console(record=True, force_terminal=False, width=120)
+
+    outcome = run_review_session(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+        console=console,
+        # ``a`` refused (no accepted cases) → ``s`` to advance → repeat.
+        prompt_fn=make_prompt_queue(["a", "s", "a", "s"]),
+        editor_fn=make_editor_writer(None),
+    )
+
+    assert outcome.quit_early is True
+    assert outcome.quit_reason == "provider_unhealthy"
+    assert outcome.provider_unhealthy is True
+    assert outcome.unhealthy_reason is not None
+    assert "consecutive LLM failures" in outcome.unhealthy_reason
+    # After 2 consecutive failures we break — processed 2 of 5.
+    assert outcome.processed == 2
+    text = console.export_text()
+    assert "provider unhealthy" in text
+
+
+def test_review_session_partial_pass_resets_counter(demo_project: Path, monkeypatch):
+    _multi_targets(demo_project, monkeypatch, n=3)
+    state = {"i": 0}
+
+    from testgap import pipeline as pipeline_mod
+
+    def stub_pf(**kwargs):
+        i = state["i"]
+        state["i"] += 1
+        if i == 1:
+            # middle function fails outright
+            return _stub_llm_failure_suggestion(kwargs["func"])
+        return _stub_partial_pass_suggestion(kwargs["func"])
+
+    monkeypatch.setattr(pipeline_mod, "process_function", stub_pf)
+    from testgap.ui import interactive as ui_mod
+
+    monkeypatch.setattr(ui_mod.pipeline, "process_function", stub_pf)
+
+    fn, _calls = _queued_completion([_pass_payload()])
+    client = LLMClient(model="fake/model", completion_fn=fn)
+
+    outcome = run_review_session(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+        # fn1 apply (accepted) → fn2 skip (failure) → fn3 apply (accepted)
+        prompt_fn=make_prompt_queue(["a", "s", "a"]),
+        editor_fn=make_editor_writer(None),
+    )
+    assert outcome.provider_unhealthy is False
+    assert outcome.quit_reason is None
+    assert outcome.processed == 3
+
+
+def test_review_session_user_quit_marks_quit_reason(demo_project: Path, monkeypatch):
+    _multi_targets(demo_project, monkeypatch, n=3)
+    from testgap import pipeline as pipeline_mod
+
+    def stub_pf(**kwargs):
+        return _stub_partial_pass_suggestion(kwargs["func"])
+
+    monkeypatch.setattr(pipeline_mod, "process_function", stub_pf)
+    from testgap.ui import interactive as ui_mod
+
+    monkeypatch.setattr(ui_mod.pipeline, "process_function", stub_pf)
+
+    fn, _calls = _queued_completion([_pass_payload()])
+    client = LLMClient(model="fake/model", completion_fn=fn)
+
+    outcome = run_review_session(
+        project_root=demo_project,
+        config=_config(),
+        llm_client=client,
+        base_ref="main",
+        prompt_fn=make_prompt_queue(["q"]),
+        editor_fn=make_editor_writer(None),
+    )
+    assert outcome.quit_early is True
+    assert outcome.quit_reason == "user_quit"
+    assert outcome.provider_unhealthy is False
+
+
 def test_keyboard_interrupt_during_llm_call_is_graceful(demo_project: Path, monkeypatch):
     """Ctrl+C raised inside ``pipeline.process_function`` (LLM phase) must not crash."""
     from testgap import pipeline as pipeline_mod

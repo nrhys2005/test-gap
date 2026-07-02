@@ -101,38 +101,44 @@ def test_scan_ollama_uses_provided_endpoint():
 
 
 # ---------------------------------------------------------------------------
-# probe_model_runnable
+# probe_model_runnable (deprecated shim — see review round 1 F1)
 # ---------------------------------------------------------------------------
 
 
-def test_probe_runnable_ok():
-    def fake(url, timeout=None):
-        return b'{"license": "mit"}'
+def test_probe_model_runnable_is_optimistic_shim():
+    """The shim never performs I/O and always reports "runnable".
+
+    The historical implementation issued an HTTP call to Ollama's ``/api/show``.
+    Round-1 review of TG-401 concluded that the probe was unreliable in
+    practice (wrong HTTP verb + version drift) and that the pipeline's
+    consecutive-failure guard is the right safety net. We keep the symbol for
+    import back-compat, but it is a no-op today.
+    """
+
+    def _boom(url, timeout=None):  # pragma: no cover — must never fire
+        raise AssertionError("probe_model_runnable must not perform I/O")
 
     status, err = probe_model_runnable(
-        "http://localhost:11434", "ollama/qwen2.5-coder:7b", http_fn=fake
+        "http://localhost:11434", "ollama/qwen2.5-coder:7b", http_fn=_boom
     )
     assert status == "runnable"
     assert err is None
 
 
-def test_probe_runnable_http_500():
-    exc = HTTPError(url="http://x/api/show", code=500, msg="oops", hdrs=None, fp=None)
-    status, err = probe_model_runnable(
-        "http://localhost:11434", "ollama/foo", http_fn=_http_raising(exc)
-    )
-    assert status == "broken"
-    assert "500" in (err or "")
+def test_probe_model_runnable_ignores_endpoint_and_model():
+    """Signature stability: the shim tolerates any input and never raises."""
+    status, err = probe_model_runnable("", "")
+    assert (status, err) == ("runnable", None)
 
 
-def test_probe_runnable_network_error():
-    status, err = probe_model_runnable(
-        "http://localhost:11434",
-        "ollama/foo",
-        http_fn=_http_raising(URLError("no route to host")),
+def test_detect_pulled_marked_runnable_without_probe():
+    """By default a pulled recommended model is PULLED_RUNNABLE — no probe fires."""
+    providers = detect_llm_providers(
+        env={}, scan_fn=_scan(pulled=("qwen2.5-coder:7b",))
     )
-    assert status == "broken"
-    assert "no route" in (err or "")
+    top = providers[0]
+    assert top.status == ProviderStatus.PULLED_RUNNABLE
+    assert top.model == "ollama/qwen2.5-coder:7b"
 
 
 # ---------------------------------------------------------------------------

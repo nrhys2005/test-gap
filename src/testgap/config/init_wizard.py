@@ -7,7 +7,6 @@ for CLI / test back-compat.
 """
 
 import os
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,15 +19,12 @@ from testgap.config.schema import (
     TestGapConfig,
 )
 from testgap.detect import (
-    DetectCache,
     Provider,
-    RunnableCacheEntry,
     detect_layout,
     detect_llm_providers,
     detect_pytest,
     detect_source_paths,
     detect_test_dirs,
-    probe_model_runnable,
 )
 
 FALLBACK_MODEL = "ollama/qwen2.5-coder:7b"
@@ -68,8 +64,8 @@ def suggest_model(project_root: Path | None = None) -> str:
     """Return the highest-priority provider's model id.
 
     ``project_root`` is accepted for signature stability (v0.3 may cache probes
-    per-project); it is unused today because the shared user-home cache is
-    consulted transparently by :func:`detect_providers_for_ui`.
+    per-project); it is unused today because provider detection is optimistic
+    (no live runnability probe — see :func:`detect_providers_for_ui`).
     """
     _ = project_root  # unused — signature kept for back-compat
     providers = detect_llm_providers()
@@ -84,34 +80,20 @@ def provider_status() -> list[tuple[str, str]]:
 
 
 def detect_providers_for_ui(project_root: Path | None = None) -> list[Provider]:
-    """Wizard/doctor-facing provider list. Consults the shared runnability cache.
+    """Wizard/doctor-facing provider list. Optimistic — no live probe.
 
-    ``project_root`` is accepted for signature stability but unused: the cache
-    location follows XDG and is machine-shared (see ``DetectCache.default_path``).
+    Historically this issued a ``probe_model_runnable`` call against
+    ``/api/show`` and cached the result. The TG-401 review round 1 concluded
+    that the probe was unreliable in practice (wrong HTTP verb + Ollama
+    version drift both surface as false-negatives) and that the pipeline /
+    review-session consecutive-failure guards are the right place to catch
+    runtime failures. We therefore default to "pulled ⇒ runnable" and skip
+    the probe entirely.
+
+    ``project_root`` is accepted for signature stability but unused.
     """
     _ = project_root  # unused — signature kept for back-compat
-    cache = DetectCache()
-
-    def runnable(endpoint: str, model: str) -> bool:
-        entry = cache.load_runnable(model, endpoint)
-        if entry is not None:
-            return entry.runnable
-        status, err = probe_model_runnable(endpoint, model)
-        cache.store_runnable(
-            RunnableCacheEntry(
-                model=model,
-                endpoint=endpoint,
-                runnable=(status == "runnable"),
-                checked_at=time.time(),
-                error=err,
-            )
-        )
-        return status == "runnable"
-
-    return detect_llm_providers(
-        env=dict(os.environ),
-        runnable_check_fn=runnable,
-    )
+    return detect_llm_providers(env=dict(os.environ))
 
 
 def build_config(

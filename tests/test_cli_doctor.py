@@ -180,9 +180,9 @@ def test_doctor_refresh_clears_cache(tmp_path: Path, monkeypatch):
 
     console = Console(record=True, force_terminal=False, width=120)
     _run_doctor_impl(tmp_path, refresh=True, verbose=False, console=console)
-    # After --refresh the cache file must be gone (before checks re-populate it via probe).
-    # NB: doctor itself does not re-probe (probe only fires from init/wizard flow), so
-    # the file remains absent here.
+    # After --refresh the cache file must be gone. Doctor performs no live
+    # probe (review round 1 removed the ``/api/show`` probe entirely — see
+    # llm_provider.probe_model_runnable docstring), so the file stays absent.
     assert not cache.path.exists()
     text = console.export_text()
     assert "detect cache cleared" in text

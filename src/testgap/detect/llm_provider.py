@@ -4,6 +4,15 @@ The module is intentionally free of LLM calls — Ollama detection uses
 ``shutil.which`` + HTTP ping + ``/api/tags``, API providers are detected by
 environment-variable presence. All I/O is injectable so unit tests can drive
 this module without a live server or subprocess.
+
+Runnability policy (TG-401 review round 1): a pulled Ollama model is
+considered ``PULLED_RUNNABLE`` **without** any additional probe. The old
+``/api/show``-based ``probe_model_runnable`` was unreliable (wrong HTTP
+verb + version drift) and produced false-negatives on healthy setups.
+Callers may still inject a ``runnable_check_fn`` for tests or a future
+``testgap doctor --warmup``, but the default is now no-probe optimism —
+runtime failures are caught by the pipeline / review-session
+consecutive-LLM-failure guards.
 """
 
 from __future__ import annotations
@@ -164,21 +173,24 @@ def probe_model_runnable(
     http_fn: HttpGetFn | None = None,
     timeout: float = 1.5,
 ) -> tuple[str, str | None]:
-    """Probe ``/api/show`` to decide if a pulled model looks executable.
+    """Deprecated no-op shim (kept for import back-compat).
 
-    Returns ``("runnable", None)`` on HTTP 200, or ``("broken", error_message)``
-    for HTTP 4xx/5xx/network errors. This is a **cheap** check — no completion
-    call. Real runnability warmup is deferred to ``testgap doctor --warmup``.
+    Previous implementations here called Ollama's ``/api/show`` endpoint to
+    guess "is this pulled model runnable?". The check was unreliable in
+    practice (wrong HTTP verb and Ollama version drift both surface as
+    false-negatives), and the review of TG-401 concluded that an optimistic
+    "pulled ⇒ runnable" judgment is a better UX: the actual runnability is
+    already double-checked by ``pipeline`` (consecutive-LLM-failure guard) and
+    the review session's mirror counter.
+
+    We keep the function so that any external importer (or an older release's
+    tests) continues to import cleanly, but it now unconditionally reports
+    ``("runnable", None)`` and never performs any I/O.
+
+    Callers inside TestGap should not depend on this. Real runnability warmup
+    remains the domain of a future ``testgap doctor --warmup``.
     """
-    fetch = http_fn if http_fn is not None else _default_http_get
-    bare_model = model.split("/", 1)[1] if model.startswith("ollama/") else model
-    url = f"{endpoint.rstrip('/')}/api/show?name={bare_model}"
-    try:
-        fetch(url, timeout=timeout)
-    except HTTPError as e:
-        return "broken", f"HTTP {e.code}"
-    except (URLError, TimeoutError, OSError) as e:
-        return "broken", str(e)
+    del endpoint, model, http_fn, timeout  # arguments retained for signature stability
     return "runnable", None
 
 
@@ -227,6 +239,14 @@ def _ollama_provider_entries(
     Emits:
       * one recommended-model entry (RUNNABLE / BROKEN / NOT_PULLED / NOT_INSTALLED)
       * plus a RUNNABLE entry per pulled model outside the recommended tuple.
+
+    Optimism policy (TG-401 review round 1): when Ollama reports a model as
+    pulled we default to :attr:`ProviderStatus.PULLED_RUNNABLE` and let the
+    real generation path (pipeline consecutive-failure guard + review session
+    mirror counter) catch actual runtime failures. Callers may still pass a
+    ``runnable_check_fn`` — historically this was ``probe_model_runnable`` —
+    but the default is now **no probe at all**, which matches how the rest of
+    the stack treats pulled models (optimistic dispatch).
     """
     if not scan.binary_present and not scan.server_reachable:
         return [

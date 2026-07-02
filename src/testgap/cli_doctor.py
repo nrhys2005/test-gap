@@ -10,7 +10,6 @@ cache) and prints a rich table. Exit code semantics:
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -31,7 +30,6 @@ from testgap.config.loader import (
 )
 from testgap.config.schema import TestGapConfig
 from testgap.detect import (
-    CACHE_FILENAME,
     DetectCache,
     ProviderStatus,
     detect_llm_providers,
@@ -138,28 +136,12 @@ def _check_config(root: Path) -> tuple[DoctorCheck, TestGapConfig | None]:
     )
 
 
-def _cached_runnable_check(cache: DetectCache):
-    """Return a ``runnable_check_fn`` that only consults the cache (no live probe).
-
-    Doctor is a read-only diagnostic — we should not hit ``/api/show`` here
-    because that adds noise / latency and can trip on transient network hiccups
-    unrelated to the user's config. If nothing is cached yet, we optimistically
-    assume RUNNABLE — the pipeline's own consecutive-failure guard is the
-    ultimate safety net.
-    """
-
-    def fn(endpoint: str, model: str) -> bool:
-        entry = cache.load_runnable(model, endpoint)
-        if entry is None:
-            return True  # optimistic — no probe from doctor
-        return entry.runnable
-
-    return fn
-
-
 def _check_llm_providers(*, verbose: bool = False) -> DoctorCheck:
-    cache = DetectCache()
-    providers = detect_llm_providers(runnable_check_fn=_cached_runnable_check(cache))
+    # Optimistic detection: "pulled ⇒ runnable". A live ``/api/show`` probe
+    # was removed in the TG-401 review round because it was unreliable
+    # (Ollama API contract drift) and the pipeline / review-session
+    # consecutive-failure guards are the real safety net for runtime issues.
+    providers = detect_llm_providers()
     usable = [
         p
         for p in providers
@@ -196,6 +178,12 @@ def _check_llm_providers(*, verbose: bool = False) -> DoctorCheck:
 
 
 def _check_cost_estimate(root: Path, config: TestGapConfig | None) -> DoctorCheck:
+    """Rough cost projection for the current uncovered-function set.
+
+    Note: this runs ``discover_targets`` which invokes ``pytest --collect-only``
+    and can take several seconds on large suites. A ``--skip-cost`` opt-out is
+    tracked for v0.2 follow-up (see review round 1, W2).
+    """
     if config is None:
         return DoctorCheck(
             name="cost estimate",
@@ -357,10 +345,6 @@ def _run_doctor_impl(
         _check_cache(),
     ]
     _render_doctor_table(checks, verbose=verbose, console=console)
-
-    # Preserve the import contract for potential v0.3 detail rendering.
-    _ = CACHE_FILENAME
-    _ = time
     return _summarize_exit(checks)
 
 

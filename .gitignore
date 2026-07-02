@@ -219,3 +219,4 @@ __marimo__/
 
 # TestGap harness plans (local working notes)
 .plans/
+uv.lock

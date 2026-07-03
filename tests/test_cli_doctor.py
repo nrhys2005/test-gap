@@ -26,7 +26,14 @@ runner = CliRunner()
 # ---------------------------------------------------------------------------
 
 
-def _fake_scan(*, pulled=(), reachable=False, binary=False):
+def _fake_scan(
+    *,
+    pulled=(),
+    reachable=False,
+    binary=False,
+    binary_source="missing",
+    binary_path=None,
+):
     def fake(**kwargs):
         endpoint = kwargs.get("endpoint", "http://localhost:11434")
         return OllamaScan(
@@ -34,6 +41,8 @@ def _fake_scan(*, pulled=(), reachable=False, binary=False):
             endpoint=endpoint,
             server_reachable=reachable,
             pulled_models=tuple(pulled),
+            binary_source=binary_source,
+            binary_path=binary_path,
         )
 
     return fake
@@ -235,3 +244,46 @@ def test_doctor_cli_returns_provider_blocker(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(app, ["doctor", "--path", str(tmp_path)])
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# TG-414: Ollama.app hint propagation
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_app_broken_shows_menubar_hint(tmp_path: Path, monkeypatch):
+    """When the recommended model is pulled but broken and the binary lives in
+    Ollama.app, the doctor's LLM-provider row must surface the menu-bar
+    upgrade guidance (TG-414 D9)."""
+    _write_min_pytest_project(tmp_path)
+    (tmp_path / ".git").mkdir()
+    _write_config(tmp_path)
+    monkeypatch.setattr(
+        llm_provider_mod,
+        "scan_ollama",
+        _fake_scan(
+            pulled=("qwen2.5-coder:7b",),
+            reachable=True,
+            binary=True,
+            binary_source="app",
+            binary_path="/Applications/Ollama.app/Contents/Resources/ollama",
+        ),
+    )
+    # Force PULLED_BROKEN by patching the runnable check to always report False.
+    from testgap.detect import llm_provider as lp
+
+    original_entries = lp._ollama_provider_entries
+
+    def broken_entries(scan, *, runnable_check_fn):
+        return original_entries(scan, runnable_check_fn=lambda ep, m: False)
+
+    monkeypatch.setattr(lp, "_ollama_provider_entries", broken_entries)
+
+    console = Console(record=True, force_terminal=False, width=200)
+    code = _run_doctor_impl(tmp_path, refresh=False, verbose=False, console=console)
+    text = console.export_text()
+    # With PULLED_BROKEN the LLM provider row is a blocker (no PULLED_RUNNABLE
+    # and no API key), and the actionable hint must mention the menu-bar
+    # upgrade path.
+    assert code == 1
+    assert "Upgrade via menu bar" in text

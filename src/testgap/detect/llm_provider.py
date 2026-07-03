@@ -23,7 +23,8 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -93,17 +94,79 @@ class Provider:
 
 @dataclass(frozen=True)
 class OllamaScan:
-    """Raw Ollama probe result. Not cached — recomputed on each call."""
+    """Raw Ollama probe result. Not cached — recomputed on each call.
+
+    ``binary_source`` and ``binary_path`` (TG-414) let downstream hint layers
+    distinguish an Ollama.app install from a plain ``brew install ollama``
+    CLI so the user gets accurate upgrade guidance on macOS.
+    """
 
     binary_present: bool
     endpoint: str
     server_reachable: bool
     pulled_models: tuple[str, ...]
     error: str | None = None
+    binary_source: BinarySource = "missing"
+    binary_path: str | None = None
 
 
 HttpGetFn = Callable[..., bytes]
 WhichFn = Callable[[str], str | None]
+
+BinarySource = Literal["app", "cli", "unknown", "missing"]
+
+
+def _classify_binary_source(path: str | None) -> BinarySource:
+    """Classify a resolved ``ollama`` binary path.
+
+    Returns one of ``"app" | "cli" | "unknown" | "missing"``.
+
+    * ``"app"`` — path (or its symlink target) lives under
+      ``/Applications/Ollama.app/`` (macOS GUI app).
+    * ``"cli"`` — path lives under a common CLI install prefix
+      (Homebrew, ``/usr/local/``, or the user's home directory).
+    * ``"unknown"`` — path exists but does not match any known prefix; the
+      hint layer surfaces the raw path so the user can decide.
+    * ``"missing"`` — ``shutil.which`` returned ``None`` or empty.
+
+    PR #9 review (gemini H):
+
+    * Symlinks are now resolved so the common Ollama.app installer shim
+      ``/usr/local/bin/ollama → /Applications/Ollama.app/...`` is classified
+      as ``"app"`` instead of ``"cli"``.
+    * ``Path.home()`` can raise ``RuntimeError`` in stripped-down container
+      environments — guard it so ``testgap doctor`` never crashes there.
+    """
+    if path is None or path == "":
+        return "missing"
+    p = path.strip()
+
+    # Resolve symlinks so the Ollama.app installer shim under /usr/local/bin
+    # or /opt/homebrew/bin surfaces as "app" instead of "cli".
+    try:
+        resolved = str(Path(p).resolve())
+    except (OSError, RuntimeError):
+        resolved = p
+
+    if p.startswith("/Applications/Ollama.app/") or resolved.startswith(
+        "/Applications/Ollama.app/"
+    ):
+        return "app"
+
+    try:
+        home_prefix: str | None = str(Path.home()) + "/"
+    except RuntimeError:
+        # ``HOME`` unset / user db unavailable (minimal Docker, some CI).
+        home_prefix = None
+
+    if (
+        p.startswith("/opt/homebrew/")
+        or p.startswith("/usr/local/")
+        or (home_prefix is not None and p.startswith(home_prefix))
+        or p.startswith("~/")
+    ):
+        return "cli"
+    return "unknown"
 
 
 def _default_http_get(url: str, timeout: float = 1.5) -> bytes:
@@ -126,7 +189,9 @@ def scan_ollama(
     caught and folded into ``server_reachable=False`` — this is UX detection,
     not a health check, so we never raise.
     """
-    binary = which_fn("ollama") is not None
+    raw_path = which_fn("ollama")
+    binary = raw_path is not None
+    binary_source = _classify_binary_source(raw_path)
     fetch = http_fn if http_fn is not None else _default_http_get
     tags_url = f"{endpoint.rstrip('/')}/api/tags"
     try:
@@ -138,6 +203,8 @@ def scan_ollama(
             server_reachable=False,
             pulled_models=(),
             error=str(e),
+            binary_source=binary_source,
+            binary_path=raw_path,
         )
     try:
         data = json.loads(raw)
@@ -148,6 +215,8 @@ def scan_ollama(
             server_reachable=False,
             pulled_models=(),
             error=str(e),
+            binary_source=binary_source,
+            binary_path=raw_path,
         )
     models: list[str] = []
     if isinstance(data, dict):
@@ -163,6 +232,8 @@ def scan_ollama(
         endpoint=endpoint,
         server_reachable=True,
         pulled_models=tuple(models),
+        binary_source=binary_source,
+        binary_path=raw_path,
     )
 
 
@@ -229,6 +300,100 @@ def _api_provider_entries(env: dict[str, str]) -> list[Provider]:
     return providers
 
 
+def _hint_for(
+    scan: OllamaScan,
+    status: ProviderStatus,
+    *,
+    model_ref: str,
+    top_pick: str,
+) -> str:
+    """Return the user-facing hint for an ``OllamaScan`` × ``ProviderStatus`` pair.
+
+    TG-414 hint matrix (source × status → hint intent):
+
+    * ``app`` + ``NOT_INSTALLED``   → "Ollama.app not running. Start it..."
+    * ``app`` + ``PULLED_BROKEN``   → "Ollama.app too old. Upgrade via menu bar"
+    * ``app`` + ``NOT_PULLED``      → "Ollama.app detected. Run: ollama pull ..."
+    * ``cli`` + ``NOT_INSTALLED``   → "run: ollama serve" or install hint
+    * ``cli`` + ``PULLED_BROKEN``   → "server error; try: ollama serve --upgrade"
+    * ``cli`` + ``NOT_PULLED``      → "run: ollama pull ..."
+    * ``unknown`` + any-not-runnable → surface the raw path so the user can act
+    * ``missing`` + any             → identical to ``cli`` branch (historical)
+    * any + ``PULLED_RUNNABLE``     → "ready — using ..."
+
+    ``unknown`` × ``PULLED_RUNNABLE`` keeps the plain "ready" line: if the
+    model already runs, path provenance is not actionable and would just add
+    noise.
+    """
+    source = scan.binary_source
+
+    if status == ProviderStatus.PULLED_RUNNABLE:
+        return f"ready — using {model_ref}"
+
+    if status == ProviderStatus.NOT_PULLED:
+        if source == "app":
+            return (
+                f"Ollama.app detected. Run: ollama pull {top_pick} "
+                "(or upgrade via menu bar for latest models)"
+            )
+        if source == "unknown":
+            return (
+                f"Ollama binary at {scan.binary_path}. "
+                "Manual upgrade may be needed."
+            )
+        return f"run: ollama pull {top_pick}"
+
+    if status == ProviderStatus.PULLED_BROKEN:
+        if source == "app":
+            return (
+                "Ollama.app version too old for this model. "
+                "Upgrade via menu bar → Check for Updates"
+            )
+        if source == "unknown":
+            return (
+                f"Ollama binary at {scan.binary_path}. "
+                "Manual upgrade may be needed."
+            )
+        return "server error; try: ollama serve --upgrade (v0.2+ auto-heal)"
+
+    if status == ProviderStatus.NOT_INSTALLED:
+        if source == "app":
+            # App bundle present but server unreachable — user needs to launch it.
+            return (
+                "Ollama.app not running. Start it from Applications, "
+                "or install CLI: brew install ollama"
+            )
+        if source == "unknown":
+            return (
+                f"Ollama binary at {scan.binary_path}. "
+                "Manual upgrade may be needed."
+            )
+        if scan.binary_present:
+            # cli / missing branch: binary exists but server is down.
+            return "run: ollama serve"
+        return "install ollama (https://ollama.com) or set an API key"
+
+    # Fallback — should be unreachable given ProviderStatus values above.
+    return f"ready — using {model_ref}"  # pragma: no cover — defensive
+
+
+def _ollama_extra_meta(scan: OllamaScan, *, reason: str | None = None) -> dict[str, Any]:
+    """Assemble the ``Provider.extra`` dict for an Ollama entry.
+
+    Always carries ``binary_source`` / ``binary_path`` so downstream layers
+    (init wizard badge, verbose doctor output) can render provenance without
+    re-scanning. ``reason`` is folded in only when present so we don't leak
+    empty strings into rendering paths.
+    """
+    meta: dict[str, Any] = {
+        "binary_source": scan.binary_source,
+        "binary_path": scan.binary_path,
+    }
+    if reason:
+        meta["reason"] = reason
+    return meta
+
+
 def _ollama_provider_entries(
     scan: OllamaScan,
     *,
@@ -248,14 +413,25 @@ def _ollama_provider_entries(
     but the default is now **no probe at all**, which matches how the rest of
     the stack treats pulled models (optimistic dispatch).
     """
+    top_pick = RECOMMENDED_OLLAMA_MODELS[0]
+    default_model_ref = f"ollama/{top_pick}"
+
     if not scan.binary_present and not scan.server_reachable:
         return [
             Provider(
                 kind=ProviderKind.OLLAMA,
-                model=f"ollama/{RECOMMENDED_OLLAMA_MODELS[0]}",
+                model=default_model_ref,
                 status=ProviderStatus.NOT_INSTALLED,
-                hint="install ollama (https://ollama.com) or set an API key",
-                extra={"reason": scan.error or "no binary and no reachable server"},
+                hint=_hint_for(
+                    scan,
+                    ProviderStatus.NOT_INSTALLED,
+                    model_ref=default_model_ref,
+                    top_pick=top_pick,
+                ),
+                extra=_ollama_extra_meta(
+                    scan,
+                    reason=scan.error or "no binary and no reachable server",
+                ),
             )
         ]
 
@@ -264,23 +440,35 @@ def _ollama_provider_entries(
         return [
             Provider(
                 kind=ProviderKind.OLLAMA,
-                model=f"ollama/{RECOMMENDED_OLLAMA_MODELS[0]}",
+                model=default_model_ref,
                 status=ProviderStatus.NOT_INSTALLED,
-                hint="run: ollama serve",
-                extra={"reason": scan.error or "server unreachable"},
+                hint=_hint_for(
+                    scan,
+                    ProviderStatus.NOT_INSTALLED,
+                    model_ref=default_model_ref,
+                    top_pick=top_pick,
+                ),
+                extra=_ollama_extra_meta(
+                    scan, reason=scan.error or "server unreachable"
+                ),
             )
         ]
 
     matched = _ollama_recommended_match(scan.pulled_models)
     entries: list[Provider] = []
     if matched is None:
-        top_pick = RECOMMENDED_OLLAMA_MODELS[0]
         entries.append(
             Provider(
                 kind=ProviderKind.OLLAMA,
-                model=f"ollama/{top_pick}",
+                model=default_model_ref,
                 status=ProviderStatus.NOT_PULLED,
-                hint=f"run: ollama pull {top_pick}",
+                hint=_hint_for(
+                    scan,
+                    ProviderStatus.NOT_PULLED,
+                    model_ref=default_model_ref,
+                    top_pick=top_pick,
+                ),
+                extra=_ollama_extra_meta(scan),
             )
         )
     else:
@@ -299,7 +487,13 @@ def _ollama_provider_entries(
                     kind=ProviderKind.OLLAMA,
                     model=model_ref,
                     status=ProviderStatus.PULLED_RUNNABLE,
-                    hint=f"ready — using {model_ref}",
+                    hint=_hint_for(
+                        scan,
+                        ProviderStatus.PULLED_RUNNABLE,
+                        model_ref=model_ref,
+                        top_pick=top_pick,
+                    ),
+                    extra=_ollama_extra_meta(scan),
                 )
             )
         else:
@@ -308,11 +502,13 @@ def _ollama_provider_entries(
                     kind=ProviderKind.OLLAMA,
                     model=model_ref,
                     status=ProviderStatus.PULLED_BROKEN,
-                    hint=(
-                        "server error; try: ollama serve --upgrade "
-                        "(v0.2+ auto-heal)"
+                    hint=_hint_for(
+                        scan,
+                        ProviderStatus.PULLED_BROKEN,
+                        model_ref=model_ref,
+                        top_pick=top_pick,
                     ),
-                    extra={"reason": broken_reason} if broken_reason else {},
+                    extra=_ollama_extra_meta(scan, reason=broken_reason),
                 )
             )
 
@@ -330,6 +526,7 @@ def _ollama_provider_entries(
                 model=f"ollama/{name}",
                 status=ProviderStatus.PULLED_RUNNABLE,
                 hint="detected pulled model",
+                extra=_ollama_extra_meta(scan),
             )
         )
     return entries

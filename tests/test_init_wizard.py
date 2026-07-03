@@ -15,7 +15,14 @@ from testgap.detect import OllamaScan
 from testgap.detect import llm_provider as llm_provider_mod
 
 
-def _fake_scan(*, pulled=(), reachable=False, binary=False):
+def _fake_scan(
+    *,
+    pulled=(),
+    reachable=False,
+    binary=False,
+    binary_source="missing",
+    binary_path=None,
+):
     def fake(**kwargs):
         endpoint = kwargs.get("endpoint", "http://localhost:11434")
         return OllamaScan(
@@ -24,6 +31,8 @@ def _fake_scan(*, pulled=(), reachable=False, binary=False):
             server_reachable=reachable,
             pulled_models=tuple(pulled),
             error=None if reachable else "not installed (test isolation)",
+            binary_source=binary_source,
+            binary_path=binary_path,
         )
 
     return fake
@@ -143,3 +152,62 @@ def test_ensure_gitignore_creates_when_missing(tmp_project: Path):
 
     assert ensure_gitignore_entry(tmp_project) is True
     assert ".testgap/" in gi.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# TG-414: provider_status badge suffix
+# ---------------------------------------------------------------------------
+
+
+def test_provider_status_appends_via_ollama_app_suffix(monkeypatch):
+    """When Ollama is detected as ``app``, the wizard hint shows the badge."""
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(
+        llm_provider_mod,
+        "scan_ollama",
+        _fake_scan(
+            pulled=("qwen2.5-coder:7b",),
+            reachable=True,
+            binary=True,
+            binary_source="app",
+            binary_path="/Applications/Ollama.app/Contents/Resources/ollama",
+        ),
+    )
+    rows = provider_status()
+    ollama_row = next(
+        r for r in rows if r[0] == "ollama/qwen2.5-coder:7b"
+    )
+    assert ollama_row[1].endswith("(via Ollama.app)")
+
+
+def test_provider_status_appends_via_cli_suffix(monkeypatch):
+    """CLI installs get a ``(via CLI)`` suffix — regression guard for wizard."""
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(
+        llm_provider_mod,
+        "scan_ollama",
+        _fake_scan(
+            pulled=("qwen2.5-coder:7b",),
+            reachable=True,
+            binary=True,
+            binary_source="cli",
+            binary_path="/opt/homebrew/bin/ollama",
+        ),
+    )
+    rows = provider_status()
+    ollama_row = next(
+        r for r in rows if r[0] == "ollama/qwen2.5-coder:7b"
+    )
+    assert ollama_row[1].endswith("(via CLI)")
+
+
+def test_provider_status_no_suffix_for_api_providers(monkeypatch, _no_ollama):
+    """API-only providers have no ``binary_source`` in ``extra`` → no suffix."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    rows = provider_status()
+    anthropic_row = next(r for r in rows if r[0].startswith("anthropic/"))
+    assert "(via" not in anthropic_row[1]

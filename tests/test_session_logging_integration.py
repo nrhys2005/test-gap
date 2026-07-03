@@ -305,6 +305,8 @@ def test_no_session_log_flag_disables_logging(
         changed_total = 0
         covered_total = 0
         cost_total = 0.0
+        provider_unhealthy = False
+        unhealthy_reason: str | None = None
 
     captured: dict[str, Any] = {}
 
@@ -348,6 +350,8 @@ def test_default_session_log_flag_creates_log_directory(
         changed_total = 0
         covered_total = 0
         cost_total = 0.0
+        provider_unhealthy = False
+        unhealthy_reason: str | None = None
 
     monkeypatch.setattr(cli_mod, "run_diff", lambda **_k: _FakeReport())
     runner = CliRunner()

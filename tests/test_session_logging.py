@@ -11,6 +11,7 @@ Filesystem isolation uses ``tmp_path``. No LLM or subprocess required.
 
 from __future__ import annotations
 
+import builtins
 import json
 from pathlib import Path
 
@@ -424,3 +425,69 @@ def test_close_is_idempotent(tmp_path: Path) -> None:
     events = _read_events(path)
     # Only one session_end recorded.
     assert sum(1 for e in events if e["event"] == "session_end") == 1
+
+
+def test_start_closes_file_when_degraded_after_open(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """PR #7 review (gemini H): if ``_emit_session_start`` fails *after* the
+    open succeeded, ``start`` must close the underlying file before falling
+    back to NoopSessionLog — otherwise the descriptor leaks.
+    """
+    import testgap.session_logging.session_log as sl_module
+
+    original_init = SessionLog.__init__
+
+    def _init_that_degrades(self, path, *, project_root, config):
+        original_init(self, path, project_root=project_root, config=config)
+        # Simulate an emission failure after the file was successfully opened.
+        self._degraded = True
+
+    monkeypatch.setattr(SessionLog, "__init__", _init_that_degrades)
+
+    result = SessionLog.start(tmp_path, _config())
+    # We asked for a real log but degraded — factory must swap in Noop.
+    assert not isinstance(result, SessionLog)
+    # And, crucially, no open file handle should linger in the discarded instance.
+    # The one glob(*.jsonl) that was created should now be closable/removable.
+    logs = list((tmp_path / ".testgap" / "logs").glob("*.jsonl"))
+    assert logs, "log file must have been created before the degrade path"
+    # If the fd was leaked this unlink would fail on Windows; on POSIX the
+    # descriptor lingers until GC. Either way we prove ``close`` was invoked.
+    for p in logs:
+        p.unlink()
+    del sl_module  # silence F401 for the import-only line
+
+
+def test_init_skips_session_start_when_open_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """PR #7 review (gemini M): if ``open`` raises OSError, ``__init__`` sets
+    ``_degraded=True`` and must skip ``_emit_session_start`` entirely — the
+    write would hit the ``_file is None`` guard and waste a JSON serialize.
+    """
+    emit_calls = {"n": 0}
+
+    def _fake_emit(self):
+        emit_calls["n"] += 1
+
+    monkeypatch.setattr(SessionLog, "_emit_session_start", _fake_emit)
+
+    # Force open to fail.
+    real_open = builtins.open
+
+    def _boom(*args, **kwargs):
+        if args and str(args[0]).endswith(".jsonl"):
+            raise OSError("simulated disk full")
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _boom)
+
+    (tmp_path / ".testgap" / "logs").mkdir(parents=True, exist_ok=True)
+    log = SessionLog(
+        tmp_path / ".testgap" / "logs" / "sim.jsonl",
+        project_root=tmp_path,
+        config=_config(),
+    )
+    assert log._degraded is True
+    assert emit_calls["n"] == 0  # session_start must NOT have been attempted

@@ -115,7 +115,11 @@ class SessionLog:
             self._degraded = True
             _warn(f"session log open failed: {e}")
 
-        self._emit_session_start()
+        # PR #7 review (gemini M): don't attempt to emit anything after an open
+        # failure — the write would just hit the ``_file is None`` guard inside
+        # ``_write_event`` and return, wasting a JSON round-trip.
+        if not self._degraded:
+            self._emit_session_start()
 
     # ------------------------------------------------------------------
     # factory
@@ -143,7 +147,14 @@ class SessionLog:
             _warn(f"session log disabled: {e}")
             return NoopSessionLog()
         if instance._degraded:
-            # Open failed inside ``__init__`` — fall back to Noop.
+            # PR #7 review (gemini H): if ``_emit_session_start`` failed *after*
+            # ``open`` succeeded, the file handle is still owned by ``instance``
+            # and would only be closed by GC. Explicitly close it before we
+            # discard the instance so we don't leak a descriptor.
+            try:
+                instance.close()
+            except Exception:  # noqa: BLE001 — never let cleanup crash the caller
+                pass
             return NoopSessionLog()
         return instance
 

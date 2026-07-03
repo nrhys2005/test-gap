@@ -230,7 +230,7 @@ def diff(
         console.print(f"[bold]Reviewing diff[/] in {root}")
         try:
             with log:
-                run_review_session(
+                outcome = run_review_session(
                     project_root=root,
                     config=config,
                     llm_client=llm_client,
@@ -240,6 +240,16 @@ def diff(
                     console=console,
                     session_log=log,
                 )
+                # PR #7 review (gemini M): normal returns (user_quit /
+                # provider_unhealthy) don't raise, so the context manager's
+                # ``__exit__`` cannot infer a reason from exc_info. Close
+                # explicitly with the outcome's reason — ``close`` is
+                # idempotent so ``__exit__`` becomes a no-op afterwards.
+                if outcome.quit_reason or outcome.provider_unhealthy:
+                    log.close(
+                        quit_reason=outcome.quit_reason
+                        or ("provider_unhealthy" if outcome.provider_unhealthy else None)
+                    )
         except LLMError as e:
             console.print(
                 f"[red]✗ LLM error:[/] {escape(summarize_llm_error(e))}"
@@ -267,6 +277,11 @@ def diff(
                 max_functions=max_functions,
                 session_log=log,
             )
+            # PR #7 review (gemini M): unhealthy provider is a "clean" early
+            # return, not an exception. Surface it in ``session_end`` before
+            # ``__exit__`` records ``quit_reason=None``.
+            if report.provider_unhealthy:
+                log.close(quit_reason="provider_unhealthy")
     except LLMError as e:
         console.print(f"[red]✗ LLM error:[/] {escape(summarize_llm_error(e))}")
         if verbose:

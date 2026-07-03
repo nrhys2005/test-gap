@@ -198,7 +198,11 @@ def diff(
         console.print(f"[red]✗[/] {escape(str(e))}")
         raise typer.Exit(code=1) from e
 
-    llm_client = LLMClient(model=config.llm.model, max_retries=config.llm.max_retries)
+    llm_client = LLMClient(
+        model=config.llm.model,
+        max_retries=config.llm.max_retries,
+        verbose=verbose,
+    )
 
     if review:
         if not sys.stdin.isatty():

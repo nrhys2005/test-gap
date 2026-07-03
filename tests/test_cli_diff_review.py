@@ -178,6 +178,76 @@ def test_diff_verbose_shows_traceback(tmp_path: Path, monkeypatch):
     assert "Traceback" in result.stdout
 
 
+# ---------------------------------------------------------------------------
+# TG-413 — --verbose forwarding to LLMClient
+# ---------------------------------------------------------------------------
+
+
+def test_diff_verbose_forwards_flag_to_llm_client(tmp_path: Path, monkeypatch):
+    """``--verbose`` must propagate as ``verbose=True`` to ``LLMClient(...)``."""
+    _write_min_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    seen: dict[str, object] = {}
+    real_cls = cli_mod.LLMClient
+
+    class _Spy(real_cls):  # type: ignore[misc,valid-type]
+        def __init__(self, *args, **kwargs):
+            seen["kwargs"] = kwargs
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "LLMClient", _Spy)
+
+    # Stub run_diff so we don't hit the real pipeline / LiteLLM.
+    class _FakeReport:
+        suggestions: list = []
+        skipped_reason: str | None = "no diff"
+        base_ref = "main"
+        head_ref = "HEAD"
+        diff_coverage_pct = 100.0
+        changed_total = 0
+        covered_total = 0
+        cost_total = 0.0
+
+    monkeypatch.setattr(cli_mod, "run_diff", lambda **kw: _FakeReport())
+
+    result = runner.invoke(app, ["diff", "--path", str(tmp_path), "--verbose"])
+    assert result.exit_code == 0, result.stdout
+    assert seen["kwargs"].get("verbose") is True  # type: ignore[union-attr]
+
+
+def test_diff_no_verbose_forwards_false_to_llm_client(tmp_path: Path, monkeypatch):
+    """Without ``--verbose``, ``LLMClient(verbose=False)`` (default)."""
+    _write_min_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    seen: dict[str, object] = {}
+    real_cls = cli_mod.LLMClient
+
+    class _Spy(real_cls):  # type: ignore[misc,valid-type]
+        def __init__(self, *args, **kwargs):
+            seen["kwargs"] = kwargs
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "LLMClient", _Spy)
+
+    class _FakeReport:
+        suggestions: list = []
+        skipped_reason: str | None = "no diff"
+        base_ref = "main"
+        head_ref = "HEAD"
+        diff_coverage_pct = 100.0
+        changed_total = 0
+        covered_total = 0
+        cost_total = 0.0
+
+    monkeypatch.setattr(cli_mod, "run_diff", lambda **kw: _FakeReport())
+
+    result = runner.invoke(app, ["diff", "--path", str(tmp_path)])
+    assert result.exit_code == 0, result.stdout
+    assert seen["kwargs"].get("verbose") is False  # type: ignore[union-attr]
+
+
 def test_setup_litellm_logging_silences_verbose_default():
     """After ``main`` runs at least once, LiteLLM logger sits at ERROR."""
     import logging

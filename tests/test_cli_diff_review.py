@@ -210,6 +210,10 @@ def test_diff_verbose_forwards_flag_to_llm_client(tmp_path: Path, monkeypatch):
         changed_total = 0
         covered_total = 0
         cost_total = 0.0
+        # TG-406 (PR #7) added these two fields; the CLI now reads
+        # ``report.provider_unhealthy`` to decide session-log quit_reason.
+        provider_unhealthy = False
+        unhealthy_reason: str | None = None
 
     monkeypatch.setattr(cli_mod, "run_diff", lambda **kw: _FakeReport())
 
@@ -242,6 +246,9 @@ def test_diff_no_verbose_forwards_false_to_llm_client(tmp_path: Path, monkeypatc
         changed_total = 0
         covered_total = 0
         cost_total = 0.0
+        # See sibling test above — TG-406 fields required by the merged CLI.
+        provider_unhealthy = False
+        unhealthy_reason: str | None = None
 
     monkeypatch.setattr(cli_mod, "run_diff", lambda **kw: _FakeReport())
 

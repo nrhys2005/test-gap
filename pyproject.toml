@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "testgap"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "AI-powered test generator that closes coverage gaps in your PRs — only suggests tests that actually pass."
 readme = "README.md"
 license = { file = "LICENSE" }

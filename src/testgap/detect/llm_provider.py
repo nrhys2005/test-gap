@@ -121,27 +121,48 @@ def _classify_binary_source(path: str | None) -> BinarySource:
 
     Returns one of ``"app" | "cli" | "unknown" | "missing"``.
 
-    * ``"app"`` — path lives under ``/Applications/Ollama.app/`` (macOS GUI app).
+    * ``"app"`` — path (or its symlink target) lives under
+      ``/Applications/Ollama.app/`` (macOS GUI app).
     * ``"cli"`` — path lives under a common CLI install prefix
       (Homebrew, ``/usr/local/``, or the user's home directory).
     * ``"unknown"`` — path exists but does not match any known prefix; the
       hint layer surfaces the raw path so the user can decide.
     * ``"missing"`` — ``shutil.which`` returned ``None`` or empty.
 
-    Symlinks are not resolved: a Homebrew shim that points into the ``.app``
-    bundle is reported as ``"cli"``. Followup work is tracked in the plan's
-    "주의사항" section.
+    PR #9 review (gemini H):
+
+    * Symlinks are now resolved so the common Ollama.app installer shim
+      ``/usr/local/bin/ollama → /Applications/Ollama.app/...`` is classified
+      as ``"app"`` instead of ``"cli"``.
+    * ``Path.home()`` can raise ``RuntimeError`` in stripped-down container
+      environments — guard it so ``testgap doctor`` never crashes there.
     """
     if path is None or path == "":
         return "missing"
     p = path.strip()
-    if p.startswith("/Applications/Ollama.app/"):
+
+    # Resolve symlinks so the Ollama.app installer shim under /usr/local/bin
+    # or /opt/homebrew/bin surfaces as "app" instead of "cli".
+    try:
+        resolved = str(Path(p).resolve())
+    except (OSError, RuntimeError):
+        resolved = p
+
+    if p.startswith("/Applications/Ollama.app/") or resolved.startswith(
+        "/Applications/Ollama.app/"
+    ):
         return "app"
-    home_prefix = str(Path.home()) + "/"
+
+    try:
+        home_prefix: str | None = str(Path.home()) + "/"
+    except RuntimeError:
+        # ``HOME`` unset / user db unavailable (minimal Docker, some CI).
+        home_prefix = None
+
     if (
         p.startswith("/opt/homebrew/")
         or p.startswith("/usr/local/")
-        or p.startswith(home_prefix)
+        or (home_prefix is not None and p.startswith(home_prefix))
         or p.startswith("~/")
     ):
         return "cli"

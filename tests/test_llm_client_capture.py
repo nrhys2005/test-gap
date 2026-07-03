@@ -165,6 +165,34 @@ def test_verbose_false_fallback_when_type_reconstruction_fails() -> None:
     assert isinstance(excinfo.value.__cause__, _WeirdError)
 
 
+def test_verbose_false_fallback_on_non_typeerror_reconstruction_failure() -> None:
+    """PR #8 review (gemini M): reconstruction may raise something other than
+    ``TypeError`` (e.g. ``ValueError`` from a custom ``__init__`` validator).
+    The fallback must still catch it and land on ``LLMError``.
+    """
+
+    class _StrictError(Exception):
+        def __init__(self, code: int) -> None:
+            # Rejects a string arg with ValueError, not TypeError.
+            if not isinstance(code, int):
+                raise ValueError("code must be int-typed")
+            super().__init__(f"code={code}")
+            self.code = code
+
+    def fake_completion(**kwargs):
+        sys.stderr.write("strict provider stack\n")
+        raise _StrictError(500)
+
+    client = LLMClient(model="fake/model", verbose=False)
+    with pytest.raises(LLMError) as excinfo:
+        client._call_with_optional_capture(fake_completion, {})
+
+    assert "[captured stderr]" in str(excinfo.value)
+    assert "strict provider stack" in str(excinfo.value)
+    # Original still reachable via __cause__.
+    assert isinstance(excinfo.value.__cause__, _StrictError)
+
+
 def test_verbose_false_no_stderr_no_attachment() -> None:
     """No stderr writes → no ``[captured stderr]`` marker in the LLMError message."""
 

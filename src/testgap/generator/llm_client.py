@@ -103,10 +103,13 @@ class LLMClient:
             new_msg = f"{e}\n[captured stderr] {snippet}"
             try:
                 new_exc: Exception = type(e)(new_msg)
-            except TypeError:
-                # Some exceptions (e.g. HTTPError) don't accept a single-arg
-                # constructor; fall back to LLMError but preserve the original
-                # via __cause__.
+            except Exception:  # noqa: BLE001 — see below
+                # PR #8 review (gemini M): some exception classes reject a
+                # single positional arg not just with ``TypeError`` (e.g.
+                # HTTPError) but also with ``ValueError`` or custom
+                # ``__init__`` validation. Catch anything raised during
+                # reconstruction and fall back to ``LLMError``; the original
+                # remains available via ``__cause__``.
                 new_exc = LLMError(new_msg)
             raise new_exc from e
 

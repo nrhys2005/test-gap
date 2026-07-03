@@ -1,0 +1,25 @@
+version: 1
+
+project:
+  language: python
+  test_framework: pytest
+  source_paths: ["src/"]
+  test_paths: ["tests/"]
+
+coverage:
+  threshold: 80
+  diff_threshold: 90
+  exclude:
+    - "**/__init__.py"
+    - "src/testgap/__main__.py"
+
+llm:
+  model: "ollama/qwen2.5-coder:7b"
+  max_cost_per_run: 0            # D1: 0 = no cap (local model)
+  max_retries: 2
+
+generation:
+  style: "match_existing"
+  include_docstrings: true
+  max_tests_per_function: 3
+  test_timeout_seconds: 30

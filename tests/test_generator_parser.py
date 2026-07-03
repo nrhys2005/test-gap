@@ -181,3 +181,56 @@ def test_dogfood_2026_07_02_replay():
     assert "import pytest" in source
     assert "from myapp.money import divide" in source
     assert "pytest.raises(ZeroDivisionError)" in source
+
+
+def test_does_not_duplicate_when_import_pytest_has_inline_comment():
+    """PR #6 review (gemini-code-assist): ``import pytest  # type: ignore`` must
+    be recognized so we don't append a duplicate.
+    """
+    payload = """{
+"imports": ["import pytest  # type: ignore"],
+"tests": [
+{
+"name": "test_raises",
+"purpose": "raises",
+"code": "def test_raises():\\n    with pytest.raises(ValueError):\\n        raise ValueError()"
+}
+]
+}"""
+    result = parse_response(_wrap(payload))
+    # Only the original comment-bearing import — no duplicate ``import pytest``.
+    assert result.imports == ["import pytest  # type: ignore"]
+
+
+def test_does_not_duplicate_when_pytest_in_multi_import():
+    """PR #6 review (gemini-code-assist): ``import sys, pytest`` must be
+    recognized so we don't append a duplicate.
+    """
+    payload = """{
+"imports": ["import sys, pytest"],
+"tests": [
+{
+"name": "test_raises",
+"purpose": "raises",
+"code": "def test_raises():\\n    with pytest.raises(ValueError):\\n        raise ValueError()"
+}
+]
+}"""
+    result = parse_response(_wrap(payload))
+    assert result.imports == ["import sys, pytest"]
+
+
+def test_does_not_duplicate_when_from_pytest_with_comment():
+    """PR #6 review edge case: ``from pytest import raises  # noqa: F401``."""
+    payload = """{
+"imports": ["from pytest import raises  # noqa: F401"],
+"tests": [
+{
+"name": "test_raises",
+"purpose": "raises",
+"code": "def test_raises():\\n    with pytest.raises(ValueError):\\n        raise ValueError()"
+}
+]
+}"""
+    result = parse_response(_wrap(payload))
+    assert result.imports == ["from pytest import raises  # noqa: F401"]

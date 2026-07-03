@@ -81,18 +81,25 @@ def _extract_json(text: str) -> str:
 def _is_pytest_import_line(line: str) -> bool:
     """True when *line* imports the ``pytest`` module.
 
-    Matches ``import pytest`` (with optional ``as`` alias) and
-    ``from pytest import ...`` — the two canonical forms.
+    Handles ``import pytest`` (with optional ``as`` alias), multi-module
+    forms like ``import sys, pytest``, ``from pytest import ...``, and
+    lines that carry inline comments (``import pytest  # type: ignore``).
     """
-    stripped = line.strip()
+    # Strip inline comment first so trailing text can't shadow the module name.
+    stripped = line.split("#", 1)[0].strip()
     if stripped.startswith("import "):
-        # "import pytest", "import pytest as pt", "import pytest, os" (rare)
-        first = stripped[len("import ") :].split(",", 1)[0].strip()
-        first = first.split(" as ", 1)[0].strip()
-        return first == "pytest"
+        # Check every comma-separated module (``import sys, pytest``).
+        parts = [
+            p.strip().split(" as ", 1)[0].strip()
+            for p in stripped[len("import ") :].split(",")
+        ]
+        return "pytest" in parts
     if stripped.startswith("from "):
-        # "from pytest import raises", "from pytest.something import x" (unlikely)
-        module = stripped[len("from ") :].split(" import ", 1)[0].strip()
+        # ``from pytest import raises``, ``from pytest.x import y``.
+        head, _, rest = stripped[len("from ") :].partition(" import ")
+        if not rest:
+            return False
+        module = head.strip()
         return module == "pytest" or module.startswith("pytest.")
     return False
 

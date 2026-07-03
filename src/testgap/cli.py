@@ -9,7 +9,9 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from testgap import __version__
+from testgap.cli_backfill import run_backfill_cli
 from testgap.cli_doctor import run_doctor
+from testgap.cli_scan import run_scan
 from testgap.config.init_wizard import (
     analyze,
     build_config,
@@ -306,6 +308,14 @@ def diff(
 # Register ``doctor`` from the dedicated module. ``run_doctor`` accepts the
 # typer options directly so we bind it as-is.
 app.command(name="doctor", help="Diagnose the local TestGap environment.")(run_doctor)
+
+# TG-403 / TG-415 — scan and backfill share the ``run_<x>`` naming pattern.
+app.command(name="scan", help="Report per-file coverage without invoking LLM.")(
+    run_scan
+)
+app.command(
+    name="backfill", help="Generate tests for uncovered functions via LLM."
+)(run_backfill_cli)
 
 
 def _print_diff_report(report: DiffRunReport) -> None:

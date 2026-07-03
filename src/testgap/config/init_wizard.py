@@ -74,9 +74,29 @@ def suggest_model(project_root: Path | None = None) -> str:
     return providers[0].model
 
 
+def _badge_suffix(p: Provider) -> str:
+    """Return a ``" (via …)"`` badge suffix based on ``Provider.extra["binary_source"]``.
+
+    Only ``"app"`` and ``"cli"`` produce a suffix — ``"unknown"``/``"missing"``
+    stay silent so the wizard table matches historical rendering for API
+    providers and no-Ollama environments.
+    """
+    extra = p.extra if isinstance(p.extra, dict) else None
+    if not extra:
+        return ""
+    src = extra.get("binary_source")
+    if src == "app":
+        return " (via Ollama.app)"
+    if src == "cli":
+        return " (via CLI)"
+    return ""
+
+
 def provider_status() -> list[tuple[str, str]]:
     """Return ``(model, hint)`` pairs for the wizard's rendered table."""
-    return [(p.model, p.hint) for p in detect_llm_providers()]
+    return [
+        (p.model, f"{p.hint}{_badge_suffix(p)}") for p in detect_llm_providers()
+    ]
 
 
 def detect_providers_for_ui(project_root: Path | None = None) -> list[Provider]:

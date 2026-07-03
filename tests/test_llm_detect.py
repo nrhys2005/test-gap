@@ -15,6 +15,8 @@ from testgap.detect.llm_provider import (
     OllamaScan,
     ProviderKind,
     ProviderStatus,
+    _classify_binary_source,
+    _ollama_provider_entries,
     detect_llm_providers,
     probe_model_runnable,
     scan_ollama,
@@ -338,3 +340,170 @@ def test_scan_ollama_wraps_other_errors(exc):
     scan = scan_ollama(which_fn=lambda _: "/x/ollama", http_fn=_http_raising(exc))
     assert scan.server_reachable is False
     assert scan.error
+
+
+# ---------------------------------------------------------------------------
+# TG-414: _classify_binary_source + Ollama.app vs CLI hint matrix
+# ---------------------------------------------------------------------------
+
+
+def test_classify_binary_source_app_path():
+    assert (
+        _classify_binary_source(
+            "/Applications/Ollama.app/Contents/Resources/ollama"
+        )
+        == "app"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/opt/homebrew/bin/ollama",
+        "/usr/local/bin/ollama",
+        "~/bin/ollama",
+    ],
+)
+def test_classify_binary_source_cli_paths(path):
+    assert _classify_binary_source(path) == "cli"
+
+
+def test_classify_binary_source_cli_home_prefix(monkeypatch, tmp_path):
+    """A path under ``Path.home()`` (e.g. ``~/.local/bin/ollama``) is CLI."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    resolved = str(tmp_path / ".local" / "bin" / "ollama")
+    assert _classify_binary_source(resolved) == "cli"
+
+
+def test_classify_binary_source_unknown_path():
+    assert _classify_binary_source("/opt/custom/ollama") == "unknown"
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_classify_binary_source_missing(value):
+    assert _classify_binary_source(value) == "missing"
+
+
+def test_scan_ollama_records_binary_source_and_path_for_app():
+    app_path = "/Applications/Ollama.app/Contents/Resources/ollama"
+    body = json.dumps({"models": []}).encode("utf-8")
+    scan = scan_ollama(
+        which_fn=lambda _: app_path, http_fn=_http_returning(body)
+    )
+    assert scan.binary_source == "app"
+    assert scan.binary_path == app_path
+
+
+def test_scan_ollama_records_binary_source_when_unreachable():
+    """Even when the server is unreachable the binary source is still recorded."""
+    scan = scan_ollama(
+        which_fn=lambda _: "/opt/homebrew/bin/ollama",
+        http_fn=_http_raising(URLError("nope")),
+    )
+    assert scan.binary_source == "cli"
+    assert scan.binary_path == "/opt/homebrew/bin/ollama"
+    assert scan.server_reachable is False
+
+
+def test_scan_ollama_records_missing_when_which_returns_none():
+    body = json.dumps({"models": []}).encode("utf-8")
+    scan = scan_ollama(which_fn=lambda _: None, http_fn=_http_returning(body))
+    assert scan.binary_source == "missing"
+    assert scan.binary_path is None
+
+
+def test_ollama_provider_entries_app_not_installed_hint():
+    """binary_source=app + server unreachable → app-specific hint."""
+    scan = OllamaScan(
+        binary_present=True,
+        endpoint="http://localhost:11434",
+        server_reachable=False,
+        pulled_models=(),
+        binary_source="app",
+        binary_path="/Applications/Ollama.app/Contents/Resources/ollama",
+    )
+    entries = _ollama_provider_entries(scan, runnable_check_fn=None)
+    assert entries[0].status == ProviderStatus.NOT_INSTALLED
+    assert "Ollama.app not running" in entries[0].hint
+    assert "Applications" in entries[0].hint
+    assert entries[0].extra.get("binary_source") == "app"
+
+
+def test_ollama_provider_entries_app_broken_uses_menubar_hint():
+    """binary_source=app + PULLED_BROKEN → menu bar upgrade guidance."""
+    scan = OllamaScan(
+        binary_present=True,
+        endpoint="http://localhost:11434",
+        server_reachable=True,
+        pulled_models=("qwen2.5-coder:7b",),
+        binary_source="app",
+        binary_path="/Applications/Ollama.app/Contents/Resources/ollama",
+    )
+    entries = _ollama_provider_entries(
+        scan, runnable_check_fn=lambda ep, m: False
+    )
+    broken = next(p for p in entries if p.status == ProviderStatus.PULLED_BROKEN)
+    assert "Upgrade via menu bar" in broken.hint
+
+
+def test_ollama_provider_entries_app_not_pulled_hint():
+    """binary_source=app + NOT_PULLED → app-aware pull instruction."""
+    scan = OllamaScan(
+        binary_present=True,
+        endpoint="http://localhost:11434",
+        server_reachable=True,
+        pulled_models=("mistral:7b",),
+        binary_source="app",
+        binary_path="/Applications/Ollama.app/Contents/Resources/ollama",
+    )
+    entries = _ollama_provider_entries(scan, runnable_check_fn=None)
+    top = next(p for p in entries if p.status == ProviderStatus.NOT_PULLED)
+    assert "Ollama.app detected" in top.hint
+    assert "ollama pull qwen2.5-coder:7b" in top.hint
+
+
+def test_ollama_provider_entries_cli_regression_pulled_runnable():
+    """binary_source=cli + PULLED_RUNNABLE keeps the historical hint verbatim."""
+    scan = OllamaScan(
+        binary_present=True,
+        endpoint="http://localhost:11434",
+        server_reachable=True,
+        pulled_models=("qwen2.5-coder:7b",),
+        binary_source="cli",
+        binary_path="/opt/homebrew/bin/ollama",
+    )
+    entries = _ollama_provider_entries(scan, runnable_check_fn=None)
+    top = entries[0]
+    assert top.status == ProviderStatus.PULLED_RUNNABLE
+    assert top.hint == "ready — using ollama/qwen2.5-coder:7b"
+
+
+def test_ollama_provider_entries_unknown_surfaces_path():
+    """binary_source=unknown → hint surfaces the raw path (NOT_PULLED case)."""
+    scan = OllamaScan(
+        binary_present=True,
+        endpoint="http://localhost:11434",
+        server_reachable=True,
+        pulled_models=(),
+        binary_source="unknown",
+        binary_path="/opt/exotic/bin/ollama",
+    )
+    entries = _ollama_provider_entries(scan, runnable_check_fn=None)
+    top = entries[0]
+    assert top.status == ProviderStatus.NOT_PULLED
+    assert "/opt/exotic/bin/ollama" in top.hint
+
+
+def test_ollama_provider_entries_missing_matches_cli_default():
+    """binary_source=missing (no binary, no server) → historical install hint."""
+    scan = OllamaScan(
+        binary_present=False,
+        endpoint="http://localhost:11434",
+        server_reachable=False,
+        pulled_models=(),
+        binary_source="missing",
+        binary_path=None,
+    )
+    entries = _ollama_provider_entries(scan, runnable_check_fn=None)
+    assert entries[0].status == ProviderStatus.NOT_INSTALLED
+    assert "install ollama" in entries[0].hint

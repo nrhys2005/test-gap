@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -34,10 +36,12 @@ class LLMClient:
         completion_fn: CompletionCallable | None = None,
         max_retries: int = 2,
         temperature: float = 0.2,
+        verbose: bool = False,
     ) -> None:
         self.model = model
         self.max_retries = max_retries
         self.temperature = temperature
+        self.verbose = verbose
         self._completion_fn = completion_fn
 
     def complete(
@@ -50,11 +54,14 @@ class LLMClient:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                raw = fn(
-                    model=self.model,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=max_output_tokens,
+                raw = self._call_with_optional_capture(
+                    fn,
+                    dict(
+                        model=self.model,
+                        messages=messages,
+                        temperature=self.temperature,
+                        max_tokens=max_output_tokens,
+                    ),
                 )
                 return self._normalize(raw)
             except Exception as e:  # network / provider errors bubble out of LiteLLM
@@ -62,6 +69,49 @@ class LLMClient:
                 if attempt >= self.max_retries:
                     break
         raise LLMError(f"LLM call failed after {self.max_retries + 1} attempts: {last_error}")
+
+    def _call_with_optional_capture(
+        self,
+        fn: CompletionCallable,
+        kwargs: dict[str, Any],
+    ) -> Any:
+        """Invoke completion; suppress LiteLLM's branded stdout/stderr unless verbose.
+
+        LiteLLM writes brand-strings (``Give Feedback / Get Help: ...``, ``Provider
+        List: ...``) via ``print()`` and ``sys.stderr.write()`` on provider errors —
+        these bypass the ``logging`` filters set by ``_setup_litellm_logging``. We
+        redirect stdout/stderr around the raw completion call only, so parsing and
+        normalization logic still surface their own log output.
+
+        On exception with captured stderr, we attach the last ~400 chars to the
+        exception message as ``[captured stderr] ...`` so operators still get a
+        diagnostic hint. stdout is discarded (branded noise).
+        """
+        if self.verbose:
+            return fn(**kwargs)
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
+                return fn(**kwargs)
+        except Exception as e:
+            captured = stderr_buf.getvalue().strip()
+            if not captured:
+                raise
+            snippet = captured[-400:]
+            new_msg = f"{e}\n[captured stderr] {snippet}"
+            try:
+                new_exc: Exception = type(e)(new_msg)
+            except Exception:  # noqa: BLE001 — see below
+                # PR #8 review (gemini M): some exception classes reject a
+                # single positional arg not just with ``TypeError`` (e.g.
+                # HTTPError) but also with ``ValueError`` or custom
+                # ``__init__`` validation. Catch anything raised during
+                # reconstruction and fall back to ``LLMError``; the original
+                # remains available via ``__cause__``.
+                new_exc = LLMError(new_msg)
+            raise new_exc from e
 
     def _resolve_completion_fn(self) -> CompletionCallable:
         if self._completion_fn is not None:

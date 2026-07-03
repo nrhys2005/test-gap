@@ -207,7 +207,11 @@ def diff(
         console.print(f"[red]✗[/] {escape(str(e))}")
         raise typer.Exit(code=1) from e
 
-    llm_client = LLMClient(model=config.llm.model, max_retries=config.llm.max_retries)
+    llm_client = LLMClient(
+        model=config.llm.model,
+        max_retries=config.llm.max_retries,
+        verbose=verbose,
+    )
 
     # Open the session log with a ``with`` block: ``__exit__`` is guaranteed to
     # fire even on ``typer.Exit`` / ``KeyboardInterrupt``, so ``session_end`` is

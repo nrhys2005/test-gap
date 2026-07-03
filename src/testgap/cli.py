@@ -21,6 +21,7 @@ from testgap.config.init_wizard import (
 from testgap.config.loader import CONFIG_FILENAME, ConfigError, load_config
 from testgap.generator import LLMClient, LLMError, summarize_llm_error
 from testgap.pipeline import DiffRunReport, FunctionSuggestion, run_diff
+from testgap.session_logging import open_session_log
 from testgap.ui import run_review_session
 
 app = typer.Typer(
@@ -179,6 +180,14 @@ def diff(
         "-v",
         help="Show full tracebacks and LiteLLM logs on error.",
     ),
+    session_log: bool = typer.Option(
+        True,
+        "--session-log/--no-session-log",
+        help=(
+            "Record per-function LLM/pytest events under .testgap/logs/ "
+            "(one JSONL file per run). Use --no-session-log to opt out."
+        ),
+    ),
 ) -> None:
     """Analyze the diff and propose tests for uncovered changes.
 
@@ -200,6 +209,18 @@ def diff(
 
     llm_client = LLMClient(model=config.llm.model, max_retries=config.llm.max_retries)
 
+    # Open the session log with a ``with`` block: ``__exit__`` is guaranteed to
+    # fire even on ``typer.Exit`` / ``KeyboardInterrupt``, so ``session_end`` is
+    # always written. When ``--no-session-log`` is passed the factory returns a
+    # :class:`NoopSessionLog` and no ``.testgap/logs/`` directory is created.
+    log = open_session_log(root, config, enabled=session_log)
+    if log.path is not None:
+        try:
+            rel = log.path.relative_to(root)
+        except ValueError:
+            rel = log.path
+        console.print(f"[dim]session log: {rel}[/]")
+
     if review:
         if not sys.stdin.isatty():
             console.print(
@@ -208,15 +229,17 @@ def diff(
             raise typer.Exit(code=1)
         console.print(f"[bold]Reviewing diff[/] in {root}")
         try:
-            run_review_session(
-                project_root=root,
-                config=config,
-                llm_client=llm_client,
-                base_ref=base,
-                head_ref=head,
-                max_functions=max_functions,
-                console=console,
-            )
+            with log:
+                run_review_session(
+                    project_root=root,
+                    config=config,
+                    llm_client=llm_client,
+                    base_ref=base,
+                    head_ref=head,
+                    max_functions=max_functions,
+                    console=console,
+                    session_log=log,
+                )
         except LLMError as e:
             console.print(
                 f"[red]✗ LLM error:[/] {escape(summarize_llm_error(e))}"
@@ -234,14 +257,16 @@ def diff(
     console.print(f"[bold]Analyzing diff[/] in {root}")
 
     try:
-        report = run_diff(
-            project_root=root,
-            config=config,
-            llm_client=llm_client,
-            base_ref=base,
-            head_ref=head,
-            max_functions=max_functions,
-        )
+        with log:
+            report = run_diff(
+                project_root=root,
+                config=config,
+                llm_client=llm_client,
+                base_ref=base,
+                head_ref=head,
+                max_functions=max_functions,
+                session_log=log,
+            )
     except LLMError as e:
         console.print(f"[red]✗ LLM error:[/] {escape(summarize_llm_error(e))}")
         if verbose:

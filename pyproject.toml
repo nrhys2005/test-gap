@@ -71,3 +71,4 @@ select = ["E", "F", "I", "W", "UP", "B"]
 "src/testgap/cli.py" = ["B008"]  # typer.Option in defaults is canonical
 "src/testgap/cli_doctor.py" = ["B008"]  # typer.Option in defaults is canonical
 "tests/test_ui_interactive.py" = ["F811"]  # pytest fixture re-export from test_pipeline.py
+"tests/test_session_logging_integration.py" = ["F811"]  # pytest fixture re-export from test_pipeline.py

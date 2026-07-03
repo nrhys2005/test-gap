@@ -116,6 +116,8 @@ def test_diff_without_review_keeps_existing_behavior(tmp_path: Path, monkeypatch
         changed_total = 0
         covered_total = 0
         cost_total = 0.0
+        provider_unhealthy = False
+        unhealthy_reason: str | None = None
 
     def fake_run_diff(**kwargs):
         sentinel["n"] += 1

@@ -1,5 +1,6 @@
 """High-level orchestration that ties coverage → generator → validator together."""
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -26,6 +27,7 @@ from testgap.generator import (
     parse_response,
 )
 from testgap.generator.prompt import PreviousFailure, PromptContext, _estimate_tokens
+from testgap.session_logging import NoopSessionLog, SessionLogProtocol, log_file_rel
 from testgap.validator import TestCaseResult, ValidatorResult, run_pytest_on_file
 
 # Consecutive-LLM-failure threshold for provider-unhealthy early-exit.
@@ -198,11 +200,15 @@ def process_function(
     llm_client: LLMClient,
     tracker: CostTracker,
     test_dirs: list[Path],
+    session_log: SessionLogProtocol | None = None,
 ) -> FunctionSuggestion:
     """Public wrapper around the private `_process_function`.
 
     Kept intentionally as a separate function (not an alias) so the public
     signature is stable even if `_process_function` evolves internally.
+
+    ``session_log`` is optional so existing external callers (tests, docs
+    examples) work unchanged — a missing value degrades to a no-op recorder.
     """
     return _process_function(
         func=func,
@@ -211,6 +217,7 @@ def process_function(
         llm_client=llm_client,
         tracker=tracker,
         test_dirs=test_dirs,
+        session_log=session_log or NoopSessionLog(),
     )
 
 
@@ -222,7 +229,9 @@ def run_diff(
     base_ref: str | None = None,
     head_ref: str = "HEAD",
     max_functions: int | None = None,
+    session_log: SessionLogProtocol | None = None,
 ) -> DiffRunReport:
+    log = session_log or NoopSessionLog()
     functions, diff_meta = discover_targets(
         project_root=project_root,
         config=config,
@@ -256,8 +265,13 @@ def run_diff(
             llm_client=llm_client,
             tracker=tracker,
             test_dirs=test_dirs,
+            session_log=log,
         )
         suggestions.append(suggestion)
+        # One tick per finalized function — matches the ``processed`` count
+        # that ``run_review_session`` reports and keeps ``session_end.
+        # functions_processed`` independent of retry count.
+        log.increment_functions()
 
         # Provider-unhealthy counter. Only "LLM failure observed AND nothing
         # accepted" counts as a strike; any acceptance (full or partial) resets.
@@ -301,6 +315,7 @@ def _process_function(
     llm_client: LLMClient,
     tracker: CostTracker,
     test_dirs: list[Path],
+    session_log: SessionLogProtocol,
 ) -> FunctionSuggestion:
     suggestion = FunctionSuggestion(function=func)
 
@@ -330,6 +345,7 @@ def _process_function(
         project_root=project_root,
         config=config,
         suggestion=suggestion,
+        session_log=session_log,
     )
 
     # The 1st-round _CallFailure branch is the ONLY legitimate path that does not
@@ -385,6 +401,7 @@ def _process_function(
         project_root=project_root,
         config=config,
         suggestion=suggestion,
+        session_log=session_log,
     )
 
     if isinstance(second_round, _CallFailure):
@@ -435,6 +452,7 @@ def _call_and_validate(
     project_root: Path,
     config: TestGapConfig,
     suggestion: FunctionSuggestion,
+    session_log: SessionLogProtocol,
 ) -> _CallSuccess | _CallFailure:
     """One LLM round: call → record cost → parse → write tmp → run pytest.
 
@@ -445,16 +463,49 @@ def _call_and_validate(
     * Owns its temp-file lifecycle via ``try/finally`` — the 1st-round finally
       runs before the 2nd-round write, so identical stems do not collide and
       exception paths still unlink.
+    * Emits ``llm_call`` / ``pytest_run`` session-log events. On the success
+      path ``attempt`` is ``suggestion.attempts`` (post-increment); on the
+      failure path it is ``suggestion.attempts + 1`` because we log the round
+      number that *would have been* — see validation note #1.
     """
+    file_rel = log_file_rel(func.file, project_root)
+    t0 = time.monotonic()
     try:
         response = llm_client.complete(messages)
     except LLMError as e:
         # Flag the provider-fault observation on the suggestion so ``run_diff`` /
         # ``run_review_session`` can drive the consecutive-failure counter.
         suggestion.llm_failure_observed = True
+        session_log.record(
+            "llm_call",
+            {
+                "function_qualname": func.qualname,
+                "function_file": file_rel,
+                # ``suggestion.attempts`` is not incremented on LLM failure,
+                # so we report the round number this failed call belongs to.
+                "attempt": suggestion.attempts + 1,
+                "model": config.llm.model,
+                "duration_s": round(time.monotonic() - t0, 3),
+                "error": str(e),
+            },
+        )
         return _CallFailure(kind="llm", message=str(e))
 
     suggestion.attempts += 1
+    session_log.record(
+        "llm_call",
+        {
+            "function_qualname": func.qualname,
+            "function_file": file_rel,
+            # Post-increment: ``attempts`` now equals the round we just made.
+            "attempt": suggestion.attempts,
+            "model": response.model,
+            "prompt_tokens": response.input_tokens,
+            "completion_tokens": response.output_tokens,
+            "cost_usd": response.cost_usd,
+            "duration_s": round(time.monotonic() - t0, 3),
+        },
+    )
 
     try:
         tracker.record(
@@ -482,6 +533,20 @@ def _call_and_validate(
             tmp_path,
             project_root=project_root,
             timeout_seconds=config.generation.test_timeout_seconds,
+        )
+        session_log.record(
+            "pytest_run",
+            {
+                "function_qualname": func.qualname,
+                # ``basename`` only — the full absolute tmp path leaks the
+                # user's home directory into the log.
+                "tmp_file": tmp_path.name,
+                "exit_code": result.exit_code,
+                "pass_count": len(result.passed),
+                "fail_count": len(result.failed),
+                "duration_s": result.duration_seconds,
+                "environment_error": result.environment_error,
+            },
         )
     finally:
         tmp_path.unlink(missing_ok=True)

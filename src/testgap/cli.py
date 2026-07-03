@@ -21,6 +21,7 @@ from testgap.config.init_wizard import (
 from testgap.config.loader import CONFIG_FILENAME, ConfigError, load_config
 from testgap.generator import LLMClient, LLMError, summarize_llm_error
 from testgap.pipeline import DiffRunReport, FunctionSuggestion, run_diff
+from testgap.session_logging import open_session_log
 from testgap.ui import run_review_session
 
 app = typer.Typer(
@@ -179,6 +180,14 @@ def diff(
         "-v",
         help="Show full tracebacks and LiteLLM logs on error.",
     ),
+    session_log: bool = typer.Option(
+        True,
+        "--session-log/--no-session-log",
+        help=(
+            "Record per-function LLM/pytest events under .testgap/logs/ "
+            "(one JSONL file per run). Use --no-session-log to opt out."
+        ),
+    ),
 ) -> None:
     """Analyze the diff and propose tests for uncovered changes.
 
@@ -200,6 +209,18 @@ def diff(
 
     llm_client = LLMClient(model=config.llm.model, max_retries=config.llm.max_retries)
 
+    # Open the session log with a ``with`` block: ``__exit__`` is guaranteed to
+    # fire even on ``typer.Exit`` / ``KeyboardInterrupt``, so ``session_end`` is
+    # always written. When ``--no-session-log`` is passed the factory returns a
+    # :class:`NoopSessionLog` and no ``.testgap/logs/`` directory is created.
+    log = open_session_log(root, config, enabled=session_log)
+    if log.path is not None:
+        try:
+            rel = log.path.relative_to(root)
+        except ValueError:
+            rel = log.path
+        console.print(f"[dim]session log: {rel}[/]")
+
     if review:
         if not sys.stdin.isatty():
             console.print(
@@ -208,15 +229,27 @@ def diff(
             raise typer.Exit(code=1)
         console.print(f"[bold]Reviewing diff[/] in {root}")
         try:
-            run_review_session(
-                project_root=root,
-                config=config,
-                llm_client=llm_client,
-                base_ref=base,
-                head_ref=head,
-                max_functions=max_functions,
-                console=console,
-            )
+            with log:
+                outcome = run_review_session(
+                    project_root=root,
+                    config=config,
+                    llm_client=llm_client,
+                    base_ref=base,
+                    head_ref=head,
+                    max_functions=max_functions,
+                    console=console,
+                    session_log=log,
+                )
+                # PR #7 review (gemini M): normal returns (user_quit /
+                # provider_unhealthy) don't raise, so the context manager's
+                # ``__exit__`` cannot infer a reason from exc_info. Close
+                # explicitly with the outcome's reason — ``close`` is
+                # idempotent so ``__exit__`` becomes a no-op afterwards.
+                if outcome.quit_reason or outcome.provider_unhealthy:
+                    log.close(
+                        quit_reason=outcome.quit_reason
+                        or ("provider_unhealthy" if outcome.provider_unhealthy else None)
+                    )
         except LLMError as e:
             console.print(
                 f"[red]✗ LLM error:[/] {escape(summarize_llm_error(e))}"
@@ -234,14 +267,21 @@ def diff(
     console.print(f"[bold]Analyzing diff[/] in {root}")
 
     try:
-        report = run_diff(
-            project_root=root,
-            config=config,
-            llm_client=llm_client,
-            base_ref=base,
-            head_ref=head,
-            max_functions=max_functions,
-        )
+        with log:
+            report = run_diff(
+                project_root=root,
+                config=config,
+                llm_client=llm_client,
+                base_ref=base,
+                head_ref=head,
+                max_functions=max_functions,
+                session_log=log,
+            )
+            # PR #7 review (gemini M): unhealthy provider is a "clean" early
+            # return, not an exception. Surface it in ``session_end`` before
+            # ``__exit__`` records ``quit_reason=None``.
+            if report.provider_unhealthy:
+                log.close(quit_reason="provider_unhealthy")
     except LLMError as e:
         console.print(f"[red]✗ LLM error:[/] {escape(summarize_llm_error(e))}")
         if verbose:

@@ -33,6 +33,7 @@ from testgap.pipeline import (
     DiffMetadata,
     FunctionSuggestion,
 )
+from testgap.session_logging import NoopSessionLog, SessionLogProtocol, log_file_rel
 from testgap.validator import run_pytest_on_file
 from testgap.validator.runner import ValidatorError
 
@@ -123,15 +124,20 @@ def run_review_session(
     console: Console | None = None,
     prompt_fn: PromptFn | None = None,
     editor_fn: EditorFn | None = None,
+    session_log: SessionLogProtocol | None = None,
 ) -> ReviewOutcome:
     """Run an interactive review session for the diff.
 
     Returns a :class:`ReviewOutcome` summarising applied / skipped / cost.
     The CLI prints the summary; this function only returns data.
+
+    ``session_log`` is optional so external callers unaware of the new
+    logging system keep working (a missing value degrades to a no-op).
     """
     console = console or Console()
     prompt_fn = prompt_fn or default_prompt_fn
     editor_fn = editor_fn or default_editor_fn
+    log = session_log or NoopSessionLog()
 
     functions, diff_meta = pipeline.discover_targets(
         project_root=project_root,
@@ -162,6 +168,7 @@ def run_review_session(
                 llm_client=llm_client,
                 tracker=tracker,
                 test_dirs=test_dirs,
+                session_log=log,
             )
             _format_suggestion_block(console, i, total, suggestion)
 
@@ -176,6 +183,7 @@ def run_review_session(
                 console=console,
                 prompt_fn=prompt_fn,
                 editor_fn=editor_fn,
+                session_log=log,
             )
         except KeyboardInterrupt:
             console.print("\n[yellow]![/] interrupted; finalizing partial results")
@@ -184,6 +192,9 @@ def run_review_session(
             break
 
         outcome.processed += 1
+        # Mirror ``run_diff``: one tick per finalized function keeps
+        # ``session_end.functions_processed`` in sync with the outcome count.
+        log.increment_functions()
         if one.action == "apply" and one.applied_file is not None:
             outcome.applied.append(one.applied_file)
         elif one.action == "skip":
@@ -245,6 +256,7 @@ def _review_one(
     console: Console,
     prompt_fn: PromptFn,
     editor_fn: EditorFn,
+    session_log: SessionLogProtocol,
 ) -> _OneOutcome:
     current = suggestion
     choices = ["a", "s", "r", "e", "q"]
@@ -281,13 +293,37 @@ def _review_one(
                 f"[green]:heavy_check_mark:[/] wrote {escape(str(applied.path))} "
                 f"({applied.test_count} tests)"
             )
+            session_log.record(
+                "user_action",
+                {
+                    "function_qualname": func.qualname,
+                    "action": "apply",
+                    "applied_path": log_file_rel(applied.path, project_root),
+                },
+            )
             return _OneOutcome(action="apply", applied_file=applied)
 
         if choice == "s":
             console.print("[dim]skipped[/]")
+            session_log.record(
+                "user_action",
+                {
+                    "function_qualname": func.qualname,
+                    "action": "skip",
+                    "applied_path": None,
+                },
+            )
             return _OneOutcome(action="skip")
 
         if choice == "q":
+            session_log.record(
+                "user_action",
+                {
+                    "function_qualname": func.qualname,
+                    "action": "quit",
+                    "applied_path": None,
+                },
+            )
             return _OneOutcome(action="quit")
 
         if choice == "r":
@@ -299,6 +335,16 @@ def _review_one(
                 )
                 continue
             console.print("[dim]regenerating...[/]")
+            # Record every regenerate attempt — a partial-failure user may
+            # regenerate multiple times before applying / quitting.
+            session_log.record(
+                "user_action",
+                {
+                    "function_qualname": func.qualname,
+                    "action": "regenerate",
+                    "applied_path": None,
+                },
+            )
             new_current = _regenerate(
                 func=func,
                 tracker=tracker,
@@ -306,6 +352,7 @@ def _review_one(
                 config=config,
                 test_dirs=test_dirs,
                 project_root=project_root,
+                session_log=session_log,
             )
             if new_current.error and not new_current.accepted_cases:
                 console.print(
@@ -318,12 +365,21 @@ def _review_one(
             continue
 
         if choice == "e":
+            session_log.record(
+                "user_action",
+                {
+                    "function_qualname": func.qualname,
+                    "action": "edit",
+                    "applied_path": None,
+                },
+            )
             try:
                 current, edit_msg = _edit_and_revalidate(
                     suggestion=current,
                     project_root=project_root,
                     config=config,
                     editor_fn=editor_fn,
+                    session_log=session_log,
                 )
             except ValidatorError as e:
                 console.print(f"[red]:cross_mark:[/] validator error: {escape(str(e))}")
@@ -350,6 +406,7 @@ def _regenerate(
     config: TestGapConfig,
     test_dirs: list[Path],
     project_root: Path,
+    session_log: SessionLogProtocol,
 ) -> FunctionSuggestion:
     """Re-run ``pipeline.process_function`` (sharing the same tracker)."""
     return pipeline.process_function(
@@ -359,6 +416,7 @@ def _regenerate(
         llm_client=llm_client,
         tracker=tracker,
         test_dirs=test_dirs,
+        session_log=session_log,
     )
 
 
@@ -408,6 +466,7 @@ def _edit_and_revalidate(
     project_root: Path,
     config: TestGapConfig,
     editor_fn: EditorFn,
+    session_log: SessionLogProtocol,
 ) -> tuple[FunctionSuggestion, str | None]:
     """Open the user's editor on the current generated code and re-validate."""
     base_code = (
@@ -441,6 +500,20 @@ def _edit_and_revalidate(
                 scratch_path,
                 project_root=project_root,
                 timeout_seconds=config.generation.test_timeout_seconds,
+            )
+            # Emit the same ``pytest_run`` schema as the batch pipeline so
+            # log consumers do not have to special-case the edit flow.
+            session_log.record(
+                "pytest_run",
+                {
+                    "function_qualname": suggestion.function.qualname,
+                    "tmp_file": scratch_path.name,
+                    "exit_code": vr.exit_code,
+                    "pass_count": len(vr.passed),
+                    "fail_count": len(vr.failed),
+                    "duration_s": vr.duration_seconds,
+                    "environment_error": vr.environment_error,
+                },
             )
         finally:
             scratch_path.unlink(missing_ok=True)

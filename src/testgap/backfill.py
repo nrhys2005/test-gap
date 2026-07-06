@@ -369,6 +369,8 @@ def run_backfill(
                 target_coverage=target_coverage,
                 progress=progress,
                 progress_task_id=task_id,
+                total_lines=scan_report.total_lines,
+                covered_lines=scan_report.covered_lines,
             )
     else:
         _run_loop(
@@ -389,6 +391,8 @@ def run_backfill(
             target_coverage=target_coverage,
             progress=None,
             progress_task_id=None,
+            total_lines=scan_report.total_lines,
+            covered_lines=scan_report.covered_lines,
         )
 
     # If the loop finished naturally AND the worklist was capped by
@@ -426,21 +430,24 @@ def _run_loop(
     target_coverage: float | None,
     progress: Progress | None,
     progress_task_id: int | None,
+    total_lines: int,
+    covered_lines: int,
 ) -> None:
     """Iterate the worklist, dispatching to auto/interactive per function.
 
     Kept as a top-level helper so both branches (``auto`` wrapped in Progress,
     ``interactive`` without) share exactly one implementation of the
     provider-unhealthy / target-coverage / budget guards.
+
+    PR #12 review (gemini HIGH): ``total_lines`` / ``covered_lines`` come
+    from the *full* scan report (including 100%-covered files). Previously
+    we recomputed them from the worklist alone, which omitted covered
+    files and inflated the projected coverage. The caller now forwards
+    ``scan_report.total_lines`` / ``scan_report.covered_lines`` directly.
     """
     consecutive_llm_failures = 0
-    covered_lines_est = int(
-        outcome.coverage_before / 100.0
-        * max(_scan_total_lines_placeholder(worklist), 1)
-    )
-    # Estimated total lines snapshot for target_coverage heuristic; falls back
-    # to a placeholder when the worklist is empty (loop won't run anyway).
-    total_lines_snapshot = _scan_total_lines_placeholder(worklist)
+    covered_lines_est = covered_lines
+    total_lines_snapshot = total_lines
 
     for idx, work in enumerate(worklist):
         # Interactive: header line replaces Progress.
@@ -629,16 +636,13 @@ def _run_loop(
     # — ``quit_reason=None`` on natural completion is the normal success path.
 
 
-def _scan_total_lines_placeholder(worklist: list[_WorkItem]) -> int:
-    """Estimate total executable lines from the worklist's file coverage.
-
-    Used only for the ``target_coverage`` heuristic. Deduplicates files by
-    ``rel_path`` so a file with N uncovered functions counts once.
-    """
-    seen: dict[str, int] = {}
-    for w in worklist:
-        seen.setdefault(w.file.rel_path, w.file.total_lines)
-    return sum(seen.values())
+# PR #12 review (gemini HIGH): the former ``_scan_total_lines_placeholder``
+# helper was removed. It counted lines only from files that had at least one
+# uncovered function, so projects with several 100%-covered files were seen
+# as smaller than reality — inflating the projected coverage inside the loop
+# and occasionally letting the ``target_coverage`` guard exceed 100%. The
+# authoritative totals now come from ``scan_report.total_lines`` /
+# ``scan_report.covered_lines`` and are forwarded to ``_run_loop`` directly.
 
 
 # ---------------------------------------------------------------------------

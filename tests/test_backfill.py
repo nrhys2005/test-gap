@@ -147,12 +147,30 @@ def _make_file_coverage(
     )
 
 
-def _scan_report(project_root: Path, files: list[FileCoverage]) -> ScanReport:
+def _scan_report(
+    project_root: Path,
+    files: list[FileCoverage],
+    *,
+    total_lines: int | None = None,
+    covered_lines: int | None = None,
+) -> ScanReport:
+    """Build a ScanReport for tests.
+
+    ``total_lines`` / ``covered_lines`` override the aggregation so we can
+    simulate reports that include fully-covered files (which the worklist
+    itself wouldn't count).
+    """
     return ScanReport(
         project_root=project_root,
         files=files,
-        total_lines=sum(fc.total_lines for fc in files),
-        covered_lines=sum(fc.covered_lines for fc in files),
+        total_lines=(
+            total_lines if total_lines is not None else sum(fc.total_lines for fc in files)
+        ),
+        covered_lines=(
+            covered_lines
+            if covered_lines is not None
+            else sum(fc.covered_lines for fc in files)
+        ),
         generated_at="2026-07-03T00:00:00+00:00",
     )
 
@@ -356,9 +374,19 @@ def test_process_auto_skip_when_discarded(tmp_project: Path):
 
 
 def _patch_scan(
-    monkeypatch, tmp_project: Path, funcs: list[tuple[str, int, int, list[int]]]
+    monkeypatch,
+    tmp_project: Path,
+    funcs: list[tuple[str, int, int, list[int]]],
+    *,
+    total_lines: int | None = None,
+    covered_lines: int | None = None,
 ) -> None:
-    """Monkeypatch ``backfill.scan_project`` to return a preset ScanReport."""
+    """Monkeypatch ``backfill.scan_project`` to return a preset ScanReport.
+
+    ``total_lines`` / ``covered_lines`` override the report's aggregates so
+    tests can simulate reports that include fully-covered files outside
+    the worklist (PR #12 review regression).
+    """
     fc = _make_file_coverage(
         "src/demo/mod.py",
         covered=0,
@@ -366,7 +394,9 @@ def _patch_scan(
         funcs=funcs,
         project_root=tmp_project,
     )
-    report = _scan_report(tmp_project, [fc])
+    report = _scan_report(
+        tmp_project, [fc], total_lines=total_lines, covered_lines=covered_lines
+    )
 
     def fake_scan_project(project_root, config, **kwargs):
         _ = (project_root, config, kwargs)
@@ -857,3 +887,62 @@ def test_backfill_progress_recorded_per_function(tmp_project: Path, monkeypatch)
     )
     bp = [p for e, p in log.records if e == EVENT_BACKFILL_PROGRESS]
     assert len(bp) == 3
+
+
+# ---------------------------------------------------------------------------
+# PR #12 review regression (gemini HIGH): totals come from scan_report,
+# not from a worklist-only placeholder. Fully-covered files must appear
+# in the denominator or projected coverage exceeds 100%.
+# ---------------------------------------------------------------------------
+
+
+def test_placeholder_helper_removed():
+    """The old ``_scan_total_lines_placeholder`` helper was deleted. Import
+    must fail so we notice if anyone reintroduces it under the same name.
+    """
+    from testgap import backfill as bf
+
+    assert not hasattr(bf, "_scan_total_lines_placeholder"), (
+        "the worklist-only placeholder must remain removed"
+    )
+
+
+def test_run_loop_uses_scan_totals(tmp_project: Path, monkeypatch):
+    """The projected coverage denominator equals ``scan_report.total_lines``.
+
+    Set up a scan where the worklist only has small files but the report
+    total is large. Before the fix, the loop used a worklist-only sum and
+    over-projected coverage. Now the report's totals are threaded through
+    ``_run_loop`` and any projection ends up bounded by them.
+    """
+    from unittest.mock import patch
+
+    _patch_scan(
+        tmp_project=tmp_project,
+        monkeypatch=monkeypatch,
+        funcs=[("a", 1, 3, [1, 2, 3])],
+        total_lines=1000,       # includes fully-covered files
+        covered_lines=500,
+    )
+    _patch_pipeline_process_function(monkeypatch, accepted=True)
+    _patch_prepare_test_dirs(monkeypatch, tmp_project)
+
+    seen: dict[str, int] = {}
+    real_run_loop = __import__("testgap.backfill", fromlist=["_run_loop"])._run_loop
+
+    def spy(*args, **kwargs):
+        seen["total_lines"] = kwargs.get("total_lines")
+        seen["covered_lines"] = kwargs.get("covered_lines")
+        return real_run_loop(*args, **kwargs)
+
+    with patch("testgap.backfill._run_loop", spy):
+        run_backfill(
+            project_root=tmp_project,
+            config=_config(),
+            llm_client=None,
+            auto=True,
+            session_log=SpyLog(),
+        )
+
+    assert seen["total_lines"] == 1000
+    assert seen["covered_lines"] == 500

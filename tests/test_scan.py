@@ -356,3 +356,66 @@ def test_report_to_dict_excludes_underlying(tmp_project: Path):
                 walk(v)
 
     walk(dumped)
+
+
+# ---------------------------------------------------------------------------
+# PR #12 review regressions (gemini CRITICAL scan.py:366)
+# ---------------------------------------------------------------------------
+
+
+def test_executable_lines_skips_def_line_for_uncovered_function():
+    """The ``def`` line runs at import time so coverage.py never marks it
+    missed. Counting it as an executable statement inflated coverage for
+    functions where the body itself was never executed. Regression: the
+    body-only walk must return zero coverage when every body line is missing.
+    """
+    from testgap.coverage.ast_grouping import UncoveredFunction
+    from testgap.scan import _executable_lines_in_function
+
+    source = (
+        "def compute(name: str) -> str:\n"
+        "    if not name:\n"
+        "        raise ValueError('empty')\n"
+        "    return name\n"
+    )
+    uf = UncoveredFunction(
+        file=Path("m.py"),
+        qualname="compute",
+        start_line=10,
+        end_line=13,
+        source=source,
+        uncovered_lines=[11, 12, 13],
+    )
+    lines = _executable_lines_in_function(uf)
+    # Body lines: 11 (if), 12 (raise), 13 (return). ``def`` line (10) MUST
+    # NOT appear here — that's exactly the fix.
+    assert 10 not in lines, "def line 10 leaked into executable set"
+    assert 11 in lines
+    assert 12 in lines
+    assert 13 in lines
+
+
+def test_executable_lines_handles_async_def():
+    """Same behavior for ``async def``. Guards the isinstance(..., AsyncFunctionDef)
+    branch introduced in the fix.
+    """
+    from testgap.coverage.ast_grouping import UncoveredFunction
+    from testgap.scan import _executable_lines_in_function
+
+    source = (
+        "async def worker(payload):\n"
+        "    result = await process(payload)\n"
+        "    return result\n"
+    )
+    uf = UncoveredFunction(
+        file=Path("m.py"),
+        qualname="worker",
+        start_line=5,
+        end_line=7,
+        source=source,
+        uncovered_lines=[6, 7],
+    )
+    lines = _executable_lines_in_function(uf)
+    assert 5 not in lines  # async def line skipped
+    assert 6 in lines
+    assert 7 in lines

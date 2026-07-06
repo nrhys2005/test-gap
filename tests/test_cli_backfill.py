@@ -174,3 +174,60 @@ def test_render_backfill_summary_no_prefix_when_verified():
     text = console.export_text()
     assert "≈42.7%" not in text
     assert "42.7%" in text
+
+
+# ---------------------------------------------------------------------------
+# PR #12 review regression (gemini MED cli_backfill.py:168, 209)
+# applied file paths must render relative to project_root.
+# ---------------------------------------------------------------------------
+
+
+def test_render_backfill_summary_renders_relative_paths(tmp_path):
+    """When ``project_root`` is passed, applied paths in the summary table
+    render as relative paths, not absolute ones.
+    """
+    from rich.console import Console
+
+    from testgap.cli_backfill import _render_backfill_summary
+    from testgap.ui.interactive import AppliedFile
+
+    root = tmp_path
+    applied = AppliedFile(
+        function_qualname="app.svc.create_user",
+        path=root / "tests" / "svc" / "test_create_user.py",
+        test_count=2,
+    )
+    outcome = BackfillOutcome(
+        coverage_before=30.0,
+        coverage_after=35.0,
+        applied=[applied],
+    )
+
+    console = Console(record=True, force_terminal=False, width=120)
+    _render_backfill_summary(outcome, console, project_root=root)
+    text = console.export_text()
+
+    # Relative form present; absolute form absent.
+    assert "tests/svc/test_create_user.py" in text
+    assert str(root) not in text, "absolute project root leaked into summary"
+
+
+def test_render_backfill_summary_keeps_absolute_when_no_root(tmp_path):
+    """Without ``project_root`` the summary falls back to the absolute path
+    (back-compat with existing callers that don't pass the argument).
+    """
+    from rich.console import Console
+
+    from testgap.cli_backfill import _render_backfill_summary
+    from testgap.ui.interactive import AppliedFile
+
+    absolute = tmp_path / "tests" / "svc" / "test_x.py"
+    outcome = BackfillOutcome(
+        applied=[AppliedFile("m.f", absolute, test_count=1)],
+    )
+
+    # Wide console so rich doesn't truncate the tmp_path with an ellipsis.
+    console = Console(record=True, force_terminal=False, width=500)
+    _render_backfill_summary(outcome, console)  # no project_root
+    text = console.export_text()
+    assert str(absolute) in text

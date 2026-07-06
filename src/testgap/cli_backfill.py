@@ -165,15 +165,24 @@ def run_backfill_cli(
             console.print_exception()
         raise typer.Exit(code=1) from e
 
-    _render_backfill_summary(outcome, console)
+    _render_backfill_summary(outcome, console, project_root=root)
 
 
-def _render_backfill_summary(outcome: BackfillOutcome, console: Console) -> None:
+def _render_backfill_summary(
+    outcome: BackfillOutcome,
+    console: Console,
+    project_root: Path | None = None,
+) -> None:
     """Render the end-of-run summary block.
 
     Enforces the ``≈`` prefix on ``coverage_after`` when the heuristic is used
     (see BackfillOutcome.coverage_after_is_estimated). A future
     ``--verify-coverage`` flag will unset that flag after re-measuring.
+
+    PR #12 review (gemini MED): applied file paths are now rendered relative
+    to ``project_root`` when given. This shortens the CLI output on real
+    projects and avoids leaking absolute directory structures in shared
+    terminals.
     """
     console.print()
     console.print("[bold]Backfill summary[/]")
@@ -201,9 +210,16 @@ def _render_backfill_summary(outcome: BackfillOutcome, console: Console) -> None
         table.add_column("path")
         table.add_column("tests", justify="right")
         for af in outcome.applied:
+            path_str = str(af.path)
+            if project_root is not None:
+                try:
+                    path_str = str(af.path.relative_to(project_root))
+                except ValueError:
+                    # Path is outside project_root — leave absolute.
+                    pass
             table.add_row(
                 escape(af.function_qualname),
-                escape(str(af.path)),
+                escape(path_str),
                 str(af.test_count),
             )
         console.print(table)

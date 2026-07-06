@@ -347,8 +347,16 @@ def _executable_lines_in_function(uf: UncoveredFunction) -> set[int]:
     """Approximate executable-line count from the function's AST source.
 
     Parses ``uf.source`` (the raw function body text) and collects
-    ``lineno`` of leaf statements. Uses the function's ``start_line`` as
-    the offset so absolute line numbers line up with coverage output.
+    ``lineno`` of leaf statements inside the function body. Uses the
+    function's ``start_line`` as the offset so absolute line numbers line
+    up with coverage output.
+
+    PR #12 review (gemini CRITICAL): the ``def`` line itself is executed at
+    import time, so coverage.py never marks it as missed. Counting it as an
+    executable statement inflated coverage for wholly-uncovered functions
+    (e.g. reporting 33% or 50% instead of 0%). We now walk only the function
+    body — skipping the ``def``/``async def`` statement — so an uncovered
+    function correctly reports 0% covered.
     """
     try:
         tree = ast.parse(uf.source)
@@ -359,9 +367,20 @@ def _executable_lines_in_function(uf: UncoveredFunction) -> set[int]:
 
     lines: set[int] = set()
     offset = uf.start_line - 1  # source[0] maps to uf.start_line
-    for node in ast.walk(tree):
-        if isinstance(node, ast.stmt) and hasattr(node, "lineno"):
-            lines.add(int(node.lineno) + offset)
+
+    # If the top-level node is a function definition, walk only its body.
+    # Otherwise (rare: raw body was passed) walk everything at top level.
+    if tree.body and isinstance(
+        tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
+        nodes_to_walk = tree.body[0].body
+    else:
+        nodes_to_walk = tree.body
+
+    for top_node in nodes_to_walk:
+        for node in ast.walk(top_node):
+            if isinstance(node, ast.stmt) and hasattr(node, "lineno"):
+                lines.add(int(node.lineno) + offset)
     return lines
 
 

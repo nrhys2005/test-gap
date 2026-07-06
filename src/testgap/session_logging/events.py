@@ -17,6 +17,14 @@ EVENT_PYTEST_RUN = "pytest_run"
 EVENT_USER_ACTION = "user_action"
 EVENT_SESSION_END = "session_end"
 
+# Backfill orchestration events (TG-415). These sit alongside the counter-driving
+# events above but do NOT participate in ``SessionLog._update_counters`` — llm_call
+# and pytest_run already accumulate cost / pass / fail during backfill so these
+# events carry orchestration metadata only.
+EVENT_BACKFILL_START = "backfill_start"
+EVENT_BACKFILL_PROGRESS = "backfill_progress"
+EVENT_BACKFILL_END = "backfill_end"
+
 
 def utc_iso_now(now: datetime | None = None) -> str:
     """ISO8601 UTC timestamp with microseconds — used inside JSONL payloads.

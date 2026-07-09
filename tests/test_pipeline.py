@@ -314,6 +314,66 @@ def test_no_retry_when_environment_error(demo_project: Path, monkeypatch):
     assert s.validator_result.environment_error == "pytest collection blew up"
 
 
+def test_pipeline_passes_configured_python_to_runners(demo_project: Path, monkeypatch):
+    """TG-417: ``config.pytest.python`` reaches both pytest runners as
+    ``python_executable`` after resolution against the project root.
+
+    Both runners are replaced by capturing fakes — the configured interpreter
+    is a bare touched file, so a real subprocess exec would fail."""
+    from testgap import pipeline as pipeline_mod
+    from testgap.coverage.runner import CoverageRunResult
+    from testgap.validator.result import ValidatorResult
+
+    venv_python = demo_project / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.touch()
+
+    calc = (demo_project / "src" / "demo" / "calc.py").resolve()
+    received_coverage: dict = {}
+    received_validator: dict = {}
+
+    def fake_coverage(project_root, source_paths, **kwargs):
+        received_coverage.update(kwargs)
+        # ``sub`` (lines 4-5) left unexecuted → it becomes the pipeline target.
+        return CoverageRunResult(
+            coverage_json_path=project_root / ".testgap" / "coverage.json",
+            executed_lines={calc: frozenset({1, 2})},
+            raw_pytest_exit_code=0,
+        )
+
+    def fake_validator(*args, **kwargs):
+        received_validator.update(kwargs)
+        # environment_error suppresses the retry round → exactly one LLM call.
+        return ValidatorResult(
+            cases=[],
+            duration_seconds=0.0,
+            raw_stdout="",
+            raw_stderr="",
+            exit_code=2,
+            environment_error="fake env error",
+        )
+
+    monkeypatch.setattr(pipeline_mod, "run_pytest_with_coverage", fake_coverage)
+    monkeypatch.setattr(pipeline_mod, "run_pytest_on_file", fake_validator)
+
+    first = _payload([_test_entry("test_anything", "assert True")])
+    fn, _calls = _queued_completion([first])
+    client = LLMClient(model="fake/model", completion_fn=fn)
+
+    config = _config()
+    config.pytest.python = ".venv/bin/python"
+    run_diff(
+        project_root=demo_project,
+        config=config,
+        llm_client=client,
+        base_ref="main",
+    )
+
+    expected = str(venv_python.resolve())
+    assert received_coverage["python_executable"] == expected
+    assert received_validator["python_executable"] == expected
+
+
 def test_retry_skipped_when_budget_would_exceed(demo_project: Path):
     """When 1st-round cost leaves no headroom for retry, guard fires."""
     first = _payload([

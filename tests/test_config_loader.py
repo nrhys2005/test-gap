@@ -56,3 +56,26 @@ def test_dump_and_reload_roundtrip(tmp_project: Path):
     reloaded = load_config(path)
     assert reloaded.llm.model == "openai/gpt-4o"
     assert reloaded.llm.max_cost_per_run == 1.5
+
+
+def test_dump_prunes_unset_pytest_section(tmp_project: Path):
+    """Auto-detection is the default — no ``pytest: {python: null}`` noise (TG-417)."""
+    import yaml
+
+    path = tmp_project / CONFIG_FILENAME
+    dump_config(TestGapConfig(), path)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert "pytest" not in data
+
+
+def test_dump_and_reload_preserves_pytest_python(tmp_project: Path):
+    import yaml
+
+    original = TestGapConfig.model_validate({"pytest": {"python": "/v/bin/python"}})
+    path = tmp_project / CONFIG_FILENAME
+    dump_config(original, path)
+
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert data["pytest"] == {"python": "/v/bin/python"}
+    reloaded = load_config(path)
+    assert reloaded.pytest.python == "/v/bin/python"

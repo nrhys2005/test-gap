@@ -15,6 +15,7 @@ from testgap.coverage import (
     resolve_base_ref,
     run_pytest_with_coverage,
 )
+from testgap.detect import resolve_pytest_python
 from testgap.generator import (
     GeneratedTest,
     GeneratedTestSet,
@@ -157,7 +158,10 @@ def discover_targets(
             skipped_reason="no changed Python lines in diff",
         )
 
-    coverage_run = run_pytest_with_coverage(project_root, config.project.source_paths)
+    resolved = resolve_pytest_python(config.pytest.python, project_root=project_root)
+    coverage_run = run_pytest_with_coverage(
+        project_root, config.project.source_paths, python_executable=resolved.path
+    )
 
     diff_report = compute_diff_coverage(
         diff=diff,
@@ -528,11 +532,13 @@ def _call_and_validate(
         return _CallFailure(kind="parse", message="parsed test set is empty")
 
     tmp_path = _write_temp_test(func=func, test_dir=test_dir, generated=generated)
+    resolved = resolve_pytest_python(config.pytest.python, project_root=project_root)
     try:
         result = run_pytest_on_file(
             tmp_path,
             project_root=project_root,
             timeout_seconds=config.generation.test_timeout_seconds,
+            python_executable=resolved.path,
         )
         session_log.record(
             "pytest_run",
@@ -541,6 +547,9 @@ def _call_and_validate(
                 # ``basename`` only — the full absolute tmp path leaks the
                 # user's home directory into the log.
                 "tmp_file": tmp_path.name,
+                # Interpreter used for the subprocess — additive field for
+                # D11-style post-mortems (best-effort log schema).
+                "python": resolved.path,
                 "exit_code": result.exit_code,
                 "pass_count": len(result.passed),
                 "fail_count": len(result.failed),

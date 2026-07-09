@@ -109,6 +109,30 @@ def _demo_source(project_root: Path) -> Path:
     return _write_source(project_root, "src/demo/mod.py", body)
 
 
+def test_scan_project_passes_resolved_python_to_runner(tmp_project: Path):
+    """TG-417: scan resolves ``config.pytest.python`` and forwards it to the runner."""
+    src = _demo_source(tmp_project)
+    venv_python = tmp_project / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.touch()
+
+    received: dict = {}
+
+    def runner(project_root: Path, source_paths: list[str], **kwargs):
+        received.update(kwargs)
+        return CoverageRunResult(
+            coverage_json_path=Path("/tmp/coverage.json"),
+            executed_lines={src: frozenset({1, 2})},
+            raw_pytest_exit_code=0,
+            file_summaries={src: {"num_statements": 4, "missing_lines": [5, 6, 7]}},
+        )
+
+    config = _config()
+    config.pytest.python = ".venv/bin/python"
+    scan_project(tmp_project, config, coverage_runner=runner)
+    assert received["python_executable"] == str(venv_python.resolve())
+
+
 def test_scan_project_with_fake_runner(tmp_project: Path):
     src = _demo_source(tmp_project)
     executed = {src: frozenset({1, 2})}

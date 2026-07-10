@@ -77,9 +77,15 @@ def resolve_pytest_python(
 
     if configured:
         candidate = Path(configured).expanduser()
-        if not candidate.is_absolute() and project_root is not None:
-            candidate = project_root / candidate
-        candidate = candidate.resolve()
+        if not candidate.is_absolute():
+            base = project_root if project_root is not None else Path.cwd()
+            candidate = base / candidate
+        # ``normpath`` cleans up ``.``/``..`` without following symlinks —
+        # crucially, ``Path.resolve()`` would rewrite a venv's ``bin/python``
+        # (a symlink to the base interpreter) into the base interpreter,
+        # losing the venv's site-packages and re-introducing D11. ``is_file()``
+        # still follows the symlink for the existence check, which is correct.
+        candidate = Path(os.path.normpath(candidate))
         if not candidate.is_file():
             raise PytestPythonNotFoundError(
                 f"pytest.python is set to {configured!r} but {candidate} does not exist. "

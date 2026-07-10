@@ -7,6 +7,7 @@ shell has a venv/conda activated.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -36,14 +37,17 @@ def test_configured_absolute_path_wins(tmp_path: Path):
     python = _make_fake_venv(tmp_path / "venv")
     resolved = resolve_pytest_python(str(python), project_root=tmp_path, env={})
     assert resolved.source == "config"
-    assert resolved.path == str(python.resolve())
+    # ``str(python)`` (NOT ``.resolve()``) — the configured path must be
+    # preserved verbatim so a venv symlink is not rewritten (see the symlink
+    # regression test below).
+    assert resolved.path == str(python)
 
 
 def test_configured_relative_resolved_against_project_root(tmp_path: Path):
     python = _make_fake_venv(tmp_path / ".venv")
     resolved = resolve_pytest_python(".venv/bin/python", project_root=tmp_path, env={})
     assert resolved.source == "config"
-    assert resolved.path == str(python.resolve())
+    assert resolved.path == str(python)
 
 
 def test_configured_expands_user(tmp_path: Path, monkeypatch):
@@ -51,7 +55,25 @@ def test_configured_expands_user(tmp_path: Path, monkeypatch):
     python = _make_fake_venv(tmp_path / "myenv")
     resolved = resolve_pytest_python("~/myenv/bin/python", project_root=tmp_path, env={})
     assert resolved.source == "config"
-    assert resolved.path == str(python.resolve())
+    assert resolved.path == str(python)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX venv symlink layout")
+def test_configured_symlink_path_is_preserved(tmp_path: Path):
+    """A configured venv interpreter that is a symlink must NOT be resolved to
+    its target — doing so runs the base interpreter and loses venv
+    site-packages, re-introducing D11 (TG-417 review 🔴-1)."""
+    real = tmp_path / "real-python"
+    real.touch()
+    link = tmp_path / ".venv" / "bin" / "python"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+
+    resolved = resolve_pytest_python(".venv/bin/python", project_root=tmp_path, env={})
+    assert resolved.source == "config"
+    # The symlink path itself, not the resolved target.
+    assert resolved.path == str(link)
+    assert resolved.path != str(real)
 
 
 def test_configured_missing_raises_with_clear_message(tmp_path: Path):

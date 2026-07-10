@@ -531,8 +531,10 @@ def _call_and_validate(
     if not generated.tests:
         return _CallFailure(kind="parse", message="parsed test set is empty")
 
-    tmp_path = _write_temp_test(func=func, test_dir=test_dir, generated=generated)
+    # Resolve BEFORE writing the temp file so a PytestPythonNotFoundError
+    # cannot leak an orphaned test file (fail-fast + no cleanup gap).
     resolved = resolve_pytest_python(config.pytest.python, project_root=project_root)
+    tmp_path = _write_temp_test(func=func, test_dir=test_dir, generated=generated)
     try:
         result = run_pytest_on_file(
             tmp_path,

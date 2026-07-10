@@ -130,7 +130,9 @@ def test_scan_project_passes_resolved_python_to_runner(tmp_project: Path):
     config = _config()
     config.pytest.python = ".venv/bin/python"
     scan_project(tmp_project, config, coverage_runner=runner)
-    assert received["python_executable"] == str(venv_python.resolve())
+    # ``str(venv_python)`` (NOT ``.resolve()``) — configured paths preserved
+    # verbatim so venv symlinks survive (TG-417 review 🔴-1).
+    assert received["python_executable"] == str(venv_python)
 
 
 def test_scan_project_with_fake_runner(tmp_project: Path):

@@ -369,7 +369,9 @@ def test_pipeline_passes_configured_python_to_runners(demo_project: Path, monkey
         base_ref="main",
     )
 
-    expected = str(venv_python.resolve())
+    # ``str(venv_python)`` (NOT ``.resolve()``) — configured paths are
+    # preserved verbatim so venv symlinks survive (TG-417 review 🔴-1).
+    expected = str(venv_python)
     assert received_coverage["python_executable"] == expected
     assert received_validator["python_executable"] == expected
 

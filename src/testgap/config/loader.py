@@ -50,5 +50,9 @@ def load_config(path: Path | None = None) -> TestGapConfig:
 
 def dump_config(config: TestGapConfig, path: Path) -> None:
     data = config.model_dump(mode="json")
+    # Auto-detection is the default — an unset pytest section is YAML noise,
+    # so prune it instead of writing ``pytest: {python: null}`` (TG-417).
+    if data.get("pytest", {}).get("python") is None:
+        data.pop("pytest", None)
     yaml_text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True, default_flow_style=False)
     path.write_text(yaml_text, encoding="utf-8")

@@ -10,6 +10,7 @@ cache) and prints a rich table. Exit code semantics:
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -32,8 +33,10 @@ from testgap.config.schema import TestGapConfig
 from testgap.detect import (
     DetectCache,
     ProviderStatus,
+    PytestPythonNotFoundError,
     detect_llm_providers,
     detect_pytest,
+    resolve_pytest_python,
 )
 from testgap.generator.prompt import _estimate_tokens
 from testgap.pipeline import discover_targets
@@ -71,6 +74,64 @@ def _check_pytest(root: Path) -> DoctorCheck:
         level="blocker",
         message="no pytest configuration detected",
         hint="→ pip install pytest",
+    )
+
+
+def _probe_pytest_import(python: str, timeout: float = 10.0) -> bool | None:
+    """``{python} -c "import pytest"`` probe.
+
+    Returns True/False on a clean run; ``None`` (unknown) on timeout/OSError so
+    a slow or odd interpreter never blocks doctor (unknown → treated as ok).
+    Module-level so tests can ``monkeypatch.setattr(cli_doctor,
+    "_probe_pytest_import", ...)`` instead of spawning subprocesses.
+    """
+    try:
+        completed = subprocess.run(
+            [python, "-c", "import pytest"],
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return completed.returncode == 0
+
+
+_SOURCE_LABELS = {
+    "config": ".testgap.yml pytest.python",
+    "virtual_env": "$VIRTUAL_ENV",
+    "conda_prefix": "$CONDA_PREFIX",
+    "sys_executable": "sys.executable",
+}
+
+
+def _check_pytest_python(root: Path, config: TestGapConfig | None) -> DoctorCheck:
+    """Show which interpreter pytest subprocesses will use, and its source (TG-417)."""
+    configured = config.pytest.python if config is not None else None
+    try:
+        resolved = resolve_pytest_python(configured, project_root=root)
+    except PytestPythonNotFoundError as e:
+        return DoctorCheck(
+            name="pytest python",
+            level="blocker",
+            message=str(e).splitlines()[0],
+            hint="→ fix pytest.python in .testgap.yml",
+        )
+    importable = _probe_pytest_import(resolved.path)
+    if importable is False:
+        return DoctorCheck(
+            name="pytest python",
+            level="warning",
+            message=(
+                f"{resolved.path} (via {_SOURCE_LABELS[resolved.source]}) — "
+                "pytest not importable"
+            ),
+            hint=f"→ {resolved.path} -m pip install pytest pytest-cov",
+        )
+    return DoctorCheck(
+        name="pytest python",
+        level="ok",
+        message=f"{resolved.path} (via {_SOURCE_LABELS[resolved.source]})",
     )
 
 
@@ -338,6 +399,7 @@ def _run_doctor_impl(
     config_check, config = _check_config(project_root)
     checks: list[DoctorCheck] = [
         _check_pytest(project_root),
+        _check_pytest_python(project_root, config),
         _check_git(project_root),
         config_check,
         _check_llm_providers(verbose=verbose),

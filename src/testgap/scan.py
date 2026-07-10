@@ -36,6 +36,7 @@ from testgap.coverage import (
 )
 from testgap.coverage.diff_coverage import UncoveredLine
 from testgap.coverage.runner import CoverageRunResult
+from testgap.detect import resolve_pytest_python
 
 SCAN_SCHEMA_VERSION = 1
 
@@ -160,7 +161,10 @@ def scan_project(
       raw AST-grouped ``UncoveredFunction`` without re-parsing.
     """
     project_root = project_root.resolve()
-    coverage_run = coverage_runner(project_root, config.project.source_paths)
+    resolved = resolve_pytest_python(config.pytest.python, project_root=project_root)
+    coverage_run = coverage_runner(
+        project_root, config.project.source_paths, python_executable=resolved.path
+    )
 
     # 1. Compute uncovered lines per file (executable minus executed).
     uncovered_lines: list[UncoveredLine] = []

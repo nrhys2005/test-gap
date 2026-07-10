@@ -16,15 +16,23 @@ def run_pytest_on_file(
     *,
     project_root: Path,
     timeout_seconds: int = 30,
+    python_executable: str | None = None,
 ) -> ValidatorResult:
-    """Run pytest against a single file using the JSON report, return per-case results."""
+    """Run pytest against a single file using the JSON report, return per-case results.
+
+    ``python_executable`` selects the interpreter for the pytest subprocess
+    (TG-417); ``None`` keeps the historical ``sys.executable`` behaviour. The
+    runner stays dumb — resolution logic lives in
+    :func:`testgap.detect.resolve_pytest_python` at the call sites.
+    """
+    python = python_executable or sys.executable
     report_path = project_root / ".testgap" / f"validator_{test_file.stem}.json"
     report_path.parent.mkdir(exist_ok=True)
     if report_path.exists():
         report_path.unlink()
 
     cmd = [
-        sys.executable,
+        python,
         "-m",
         "pytest",
         str(test_file),
@@ -55,7 +63,7 @@ def run_pytest_on_file(
             environment_error=f"pytest timed out after {timeout_seconds}s",
         )
     except FileNotFoundError as e:
-        raise ValidatorError("python executable not found on PATH") from e
+        raise ValidatorError(f"python executable not found: {python}") from e
 
     duration = time.monotonic() - start
 

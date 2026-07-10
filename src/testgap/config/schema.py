@@ -33,6 +33,13 @@ class GenerationConfig(BaseModel):
     test_timeout_seconds: int = Field(default=30, ge=1, le=600)
 
 
+class PytestConfig(BaseModel):
+    # Python interpreter used to run the target project's pytest (TG-417/D11).
+    # None (default) → auto-detect via $VIRTUAL_ENV / $CONDA_PREFIX, then fall
+    # back to sys.executable. See ``testgap.detect.python_env``.
+    python: str | None = None
+
+
 class TestGapConfig(BaseModel):
     __test__ = False  # not a pytest test class despite the name
 
@@ -41,6 +48,7 @@ class TestGapConfig(BaseModel):
     coverage: CoverageConfig = Field(default_factory=CoverageConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    pytest: PytestConfig = Field(default_factory=PytestConfig)
 
     @field_validator("version")
     @classmethod

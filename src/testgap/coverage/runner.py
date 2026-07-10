@@ -28,8 +28,16 @@ def run_pytest_with_coverage(
     source_paths: list[str],
     extra_pytest_args: list[str] | None = None,
     timeout_seconds: int = 300,
+    python_executable: str | None = None,
 ) -> CoverageRunResult:
-    """Run pytest under coverage.py, return per-file executed line sets."""
+    """Run pytest under coverage.py, return per-file executed line sets.
+
+    ``python_executable`` selects the interpreter for the pytest subprocess
+    (TG-417); ``None`` keeps the historical ``sys.executable`` behaviour. The
+    runner stays dumb — resolution logic lives in
+    :func:`testgap.detect.resolve_pytest_python` at the call sites.
+    """
+    python = python_executable or sys.executable
     output_dir = project_root / ".testgap"
     output_dir.mkdir(exist_ok=True)
     json_path = output_dir / "coverage.json"
@@ -41,7 +49,7 @@ def run_pytest_with_coverage(
         source_args.extend(["--cov", path.rstrip("/")])
 
     cmd = [
-        sys.executable,
+        python,
         "-m",
         "pytest",
         *source_args,
@@ -65,7 +73,7 @@ def run_pytest_with_coverage(
     except subprocess.TimeoutExpired as e:
         raise CoverageError(f"pytest timed out after {timeout_seconds}s") from e
     except FileNotFoundError as e:
-        raise CoverageError("python executable not found on PATH") from e
+        raise CoverageError(f"python executable not found: {python}") from e
 
     if not json_path.is_file():
         raise CoverageError(

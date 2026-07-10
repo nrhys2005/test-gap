@@ -13,6 +13,7 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
+import testgap.cli_doctor as cli_doctor_mod
 from testgap.cli import app
 from testgap.cli_doctor import _run_doctor_impl
 from testgap.detect import OllamaScan
@@ -53,7 +54,18 @@ def _isolate_env(monkeypatch, tmp_path):
     """Clear API key env vars + isolate the XDG cache so doctor is deterministic."""
     for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
         monkeypatch.delenv(k, raising=False)
+    # TG-417: the "pytest python" check reads these — without clearing them the
+    # source label flips between $VIRTUAL_ENV and sys.executable depending on
+    # whether the dev shell has a venv/conda activated (flaky).
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+
+
+@pytest.fixture(autouse=True)
+def _stub_pytest_probe(monkeypatch):
+    """Skip the real ``import pytest`` subprocess probe (slow + host-dependent)."""
+    monkeypatch.setattr(cli_doctor_mod, "_probe_pytest_import", lambda python: True)
 
 
 def _write_min_pytest_project(root: Path) -> None:
@@ -287,3 +299,88 @@ def test_doctor_app_broken_shows_menubar_hint(tmp_path: Path, monkeypatch):
     # upgrade path.
     assert code == 1
     assert "Upgrade via menu bar" in text
+
+
+# ---------------------------------------------------------------------------
+# TG-417: pytest python check
+# ---------------------------------------------------------------------------
+
+
+def _ok_llm(monkeypatch) -> None:
+    monkeypatch.setattr(
+        llm_provider_mod,
+        "scan_ollama",
+        _fake_scan(pulled=("qwen2.5-coder:7b",), reachable=True, binary=True),
+    )
+
+
+def test_doctor_shows_resolved_python(tmp_path: Path, monkeypatch):
+    """With no config override and no venv env vars, doctor reports sys.executable."""
+    import sys
+
+    _write_min_pytest_project(tmp_path)
+    _write_config(tmp_path)
+    (tmp_path / ".git").mkdir()
+    _ok_llm(monkeypatch)
+
+    console = Console(record=True, force_terminal=False, width=200)
+    code = _run_doctor_impl(tmp_path, refresh=False, verbose=False, console=console)
+    text = console.export_text()
+    assert code == 0
+    assert "pytest python" in text
+    assert Path(sys.executable).name in text
+    assert "sys.executable" in text
+
+
+def test_doctor_configured_python_missing_exit_1(tmp_path: Path, monkeypatch):
+    """A pytest.python pointing at a non-existent file is a blocker."""
+    _write_min_pytest_project(tmp_path)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".testgap.yml").write_text(
+        "version: 1\n"
+        "llm:\n  model: ollama/qwen2.5-coder:7b\n  max_cost_per_run: 0\n"
+        "pytest:\n  python: /nonexistent/bin/python\n",
+        encoding="utf-8",
+    )
+    _ok_llm(monkeypatch)
+
+    console = Console(record=True, force_terminal=False, width=200)
+    code = _run_doctor_impl(tmp_path, refresh=False, verbose=False, console=console)
+    text = console.export_text()
+    assert code == 1
+    assert "pytest.python" in text
+
+
+def test_doctor_pytest_not_importable_warns(tmp_path: Path, monkeypatch):
+    """A resolvable interpreter without pytest installed is a warning + pip hint."""
+    _write_min_pytest_project(tmp_path)
+    _write_config(tmp_path)
+    (tmp_path / ".git").mkdir()
+    _ok_llm(monkeypatch)
+    monkeypatch.setattr(cli_doctor_mod, "_probe_pytest_import", lambda python: False)
+
+    console = Console(record=True, force_terminal=False, width=200)
+    code = _run_doctor_impl(tmp_path, refresh=False, verbose=False, console=console)
+    text = console.export_text()
+    assert code == 2
+    assert "pip install pytest pytest-cov" in text
+
+
+def test_doctor_virtual_env_source_label(tmp_path: Path, monkeypatch):
+    """An active $VIRTUAL_ENV with a real interpreter shows the venv source label."""
+    _write_min_pytest_project(tmp_path)
+    _write_config(tmp_path)
+    (tmp_path / ".git").mkdir()
+    _ok_llm(monkeypatch)
+
+    venv = tmp_path / "fake-venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").touch()
+    monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+
+    console = Console(record=True, force_terminal=False, width=200)
+    code = _run_doctor_impl(tmp_path, refresh=False, verbose=False, console=console)
+    text = console.export_text()
+    assert code == 0
+    assert "VIRTUAL_ENV" in text
+    assert "fake-venv" in text

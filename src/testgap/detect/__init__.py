@@ -18,6 +18,11 @@ from testgap.detect.llm_provider import (
     scan_ollama,
 )
 from testgap.detect.pytest_detect import detect_pytest
+from testgap.detect.python_env import (
+    PytestPythonNotFoundError,
+    ResolvedPython,
+    resolve_pytest_python,
+)
 from testgap.detect.test_dir_detect import detect_test_dirs
 
 __all__ = [
@@ -31,7 +36,9 @@ __all__ = [
     "Provider",
     "ProviderKind",
     "ProviderStatus",
+    "PytestPythonNotFoundError",
     "RECOMMENDED_OLLAMA_MODELS",
+    "ResolvedPython",
     "RunnableCacheEntry",
     "detect_layout",
     "detect_llm_providers",
@@ -39,5 +46,6 @@ __all__ = [
     "detect_source_paths",
     "detect_test_dirs",
     "probe_model_runnable",
+    "resolve_pytest_python",
     "scan_ollama",
 ]

@@ -42,3 +42,20 @@ def test_max_tests_per_function_bounds():
         TestGapConfig.model_validate({"generation": {"max_tests_per_function": 0}})
     with pytest.raises(ValidationError):
         TestGapConfig.model_validate({"generation": {"max_tests_per_function": 11}})
+
+
+def test_pytest_python_defaults_to_none():
+    """None → auto-detection at resolve time (TG-417)."""
+    config = TestGapConfig()
+    assert config.pytest.python is None
+
+
+def test_pytest_python_parses_from_mapping():
+    config = TestGapConfig.model_validate({"pytest": {"python": "/v/bin/python"}})
+    assert config.pytest.python == "/v/bin/python"
+
+
+def test_pytest_unknown_keys_ignored():
+    """Forward compatibility: older testgap must ignore newer pytest sub-keys."""
+    config = TestGapConfig.model_validate({"pytest": {"python": None, "future_key": True}})
+    assert config.pytest.python is None

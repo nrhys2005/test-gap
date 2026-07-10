@@ -27,6 +27,7 @@ from testgap import pipeline
 from testgap.config.schema import TestGapConfig
 from testgap.cost import CostTracker
 from testgap.coverage import UncoveredFunction
+from testgap.detect import resolve_pytest_python
 from testgap.generator import GeneratedTest, GeneratedTestSet, LLMClient
 from testgap.pipeline import (
     CONSECUTIVE_LLM_FAILURE_LIMIT,
@@ -495,11 +496,13 @@ def _edit_and_revalidate(
         _ensure_testgap_conftest(scratch_dir)
         scratch_path = scratch_dir / f"validator_edit_{tmp_path.stem}.py"
         scratch_path.write_text(after, encoding="utf-8")
+        resolved = resolve_pytest_python(config.pytest.python, project_root=project_root)
         try:
             vr = run_pytest_on_file(
                 scratch_path,
                 project_root=project_root,
                 timeout_seconds=config.generation.test_timeout_seconds,
+                python_executable=resolved.path,
             )
             # Emit the same ``pytest_run`` schema as the batch pipeline so
             # log consumers do not have to special-case the edit flow.
@@ -508,6 +511,7 @@ def _edit_and_revalidate(
                 {
                     "function_qualname": suggestion.function.qualname,
                     "tmp_file": scratch_path.name,
+                    "python": resolved.path,
                     "exit_code": vr.exit_code,
                     "pass_count": len(vr.passed),
                     "fail_count": len(vr.failed),
